@@ -1,0 +1,245 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  TRAINING_CENTRE
+  DISTRICT_OFFICER
+  QUALITY_REVIEWER
+  STATE_OFFICER
+}
+
+enum RevisionStatus {
+  DRAFT
+  DISTRICT_REVIEW
+  QUALITY_REVIEW
+  STATE_REVIEW
+  APPROVED
+  RETURNED
+  REJECTED
+}
+
+enum ReviewStage {
+  DISTRICT
+  QUALITY
+  STATE
+}
+
+enum DecisionOutcome {
+  APPROVE
+  RETURN
+  REJECT
+}
+
+enum GenerationStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+model District {
+  id      String           @id @default(uuid()) @db.Uuid
+  code    String           @unique
+  name    String
+  centres TrainingCentre[]
+  users   User[]
+}
+
+model TrainingCentre {
+  id         String   @id @default(uuid()) @db.Uuid
+  code       String   @unique
+  name       String
+  districtId String   @db.Uuid
+  district   District @relation(fields: [districtId], references: [id], onDelete: Restrict)
+  users      User[]
+  batches    Batch[]
+
+  @@index([districtId])
+}
+
+model User {
+  id            String          @id @default(uuid()) @db.Uuid
+  email         String          @unique
+  displayName   String
+  passwordHash  String
+  role          Role
+  active        Boolean         @default(true)
+  centreId      String?         @db.Uuid
+  districtId    String?         @db.Uuid
+  centre        TrainingCentre? @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  district      District?       @relation(fields: [districtId], references: [id], onDelete: Restrict)
+  createdAt     DateTime        @default(now()) @db.Timestamptz(3)
+  sessions      Session[]
+  revisions     BatchRevision[]
+  decisions     Decision[]
+  revocations   Certificate[]
+  auditEvents   AuditEvent[]
+  notifications Notification[]
+}
+
+model Session {
+  tokenHash String   @id @db.Char(64)
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  expiresAt DateTime @db.Timestamptz(3)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Batch {
+  id         String          @id @default(uuid()) @db.Uuid
+  centreId   String          @db.Uuid
+  centre     TrainingCentre  @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  courseName String
+  createdAt  DateTime        @default(now()) @db.Timestamptz(3)
+  revisions  BatchRevision[]
+  candidates Candidate[]
+
+  @@index([centreId, createdAt])
+}
+
+model BatchRevision {
+  id          String              @id @default(uuid()) @db.Uuid
+  batchId     String              @db.Uuid
+  batch       Batch               @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  revision    Int
+  status      RevisionStatus      @default(DRAFT)
+  createdById String              @db.Uuid
+  createdBy   User                @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime            @default(now()) @db.Timestamptz(3)
+  submittedAt DateTime?           @db.Timestamptz(3)
+  statusSince DateTime            @default(now()) @db.Timestamptz(3)
+  candidates  RevisionCandidate[]
+  decisions   Decision[]
+
+  @@unique([batchId, revision])
+  @@unique([id, batchId])
+  @@index([status, statusSince])
+}
+
+model Candidate {
+  id        String              @id @default(uuid()) @db.Uuid
+  batchId   String              @db.Uuid
+  batch     Batch               @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  reference String
+  revisions RevisionCandidate[]
+
+  @@unique([batchId, reference])
+  @@unique([id, batchId])
+}
+
+model RevisionCandidate {
+  revisionId  String        @db.Uuid
+  candidateId String        @db.Uuid
+  batchId     String        @db.Uuid
+  revision    BatchRevision @relation(fields: [revisionId, batchId], references: [id, batchId], onDelete: Restrict)
+  candidate   Candidate     @relation(fields: [candidateId, batchId], references: [id, batchId], onDelete: Restrict)
+  fullName    String
+  phoneE164   String
+  certificate Certificate?
+
+  @@id([revisionId, candidateId])
+  @@index([candidateId, batchId])
+}
+
+model Decision {
+  id         String          @id @default(uuid()) @db.Uuid
+  revisionId String          @db.Uuid
+  revision   BatchRevision   @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  actorId    String          @db.Uuid
+  actor      User            @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  stage      ReviewStage
+  outcome    DecisionOutcome
+  reason     String?
+  createdAt  DateTime        @default(now()) @db.Timestamptz(3)
+
+  @@unique([revisionId, stage, actorId])
+  @@index([actorId])
+}
+
+model Certificate {
+  id               String            @id @default(uuid()) @db.Uuid
+  number           String            @unique
+  revisionId       String            @db.Uuid
+  candidateId      String            @unique @db.Uuid
+  candidate        RevisionCandidate @relation(fields: [revisionId, candidateId], references: [revisionId, candidateId], onDelete: Restrict)
+  generationStatus GenerationStatus  @default(PENDING)
+  objectKey        String?           @unique
+  issuedAt         DateTime?         @db.Timestamptz(3)
+  revokedAt        DateTime?         @db.Timestamptz(3)
+  revokedById      String?           @db.Uuid
+  revokedBy        User?             @relation(fields: [revokedById], references: [id], onDelete: Restrict)
+  revocationReason String?
+  delivery         MessageDelivery?
+  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+
+  @@unique([revisionId, candidateId])
+}
+
+model MessageDelivery {
+  id              String         @id @default(uuid()) @db.Uuid
+  certificateId   String         @unique @db.Uuid
+  certificate     Certificate    @relation(fields: [certificateId], references: [id], onDelete: Restrict)
+  idempotencyKey  String         @unique
+  status          DeliveryStatus @default(PENDING)
+  attempts        Int            @default(0)
+  providerReceipt String?        @unique
+  deliveredAt     DateTime?      @db.Timestamptz(3)
+  createdAt       DateTime       @default(now()) @db.Timestamptz(3)
+}
+
+model AuditEvent {
+  id           BigInt   @id @default(autoincrement())
+  actorId      String?  @db.Uuid
+  actor        User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  resourceType String
+  resourceId   String
+  action       String
+  details      Json
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([resourceType, resourceId, id])
+}
+
+model OutboxEvent {
+  id            String    @id @default(uuid()) @db.Uuid
+  dedupeKey     String    @unique
+  type          String
+  aggregateId   String
+  payload       Json
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now()) @db.Timestamptz(3)
+  completedAt   DateTime? @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([completedAt, nextAttemptAt])
+}
+
+model Notification {
+  id         BigInt    @id @default(autoincrement())
+  userId     String    @db.Uuid
+  user       User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  dedupeKey  String
+  type       String
+  resourceId String
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  readAt     DateTime? @db.Timestamptz(3)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, id])
+}

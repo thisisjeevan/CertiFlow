@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/coverage
+apps/api/src/generated
+.git
+.agents
+.codex
+.aws
+.npm-cache
+.env*
+**/.env*
+tmp
+*.pdf

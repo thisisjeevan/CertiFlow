@@ -1,0 +1,141 @@
+name: certiflow
+
+x-tools: &tools
+  image: certiflow-tools:local
+  build:
+    context: .
+    dockerfile: apps/api/Dockerfile
+    target: tools
+  volumes:
+    - database-secrets:/run/database-secrets:ro
+
+x-runtime: &runtime
+  image: certiflow-backend:local
+  build:
+    context: .
+    dockerfile: apps/api/Dockerfile
+    target: runtime
+  init: true
+  restart: unless-stopped
+  volumes:
+    - database-secrets:/run/database-secrets:ro
+
+services:
+  secrets-init:
+    image: postgres:17-alpine
+    entrypoint: ["/bin/sh", "/init-secrets.sh"]
+    volumes:
+      - ./docker/init-secrets.sh:/init-secrets.sh:ro
+      - database-secrets:/run/database-secrets
+      - demo-secrets:/run/demo-secrets
+
+  db:
+    image: postgres:17-alpine
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: certiflow
+      POSTGRES_DB: certiflow
+      POSTGRES_PASSWORD_FILE: /run/database-secrets/password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - database-secrets:/run/database-secrets:ro
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/01-test-db.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "certiflow", "-d", "certiflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *tools
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["npm", "run", "db:migrate"]
+
+  seed:
+    <<: *tools
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: development
+    command: ["demo-seed"]
+    volumes:
+      - database-secrets:/run/database-secrets:ro
+      - demo-secrets:/run/demo-secrets:ro
+
+  api:
+    <<: *runtime
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: development
+      APP_ORIGIN: http://localhost:${CERTIFLOW_PORT:-8080}
+      TRUST_PROXY_HOPS: "1"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+
+  worker:
+    <<: *runtime
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379
+    command: ["node", "apps/api/dist/worker.js"]
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${CERTIFLOW_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/health/ready"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+
+  tests:
+    <<: *tools
+    profiles: [test]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_NAME: certiflow_test
+      NODE_ENV: test
+    command: ["test"]
+
+volumes:
+  postgres-data:
+  redis-data:
+  database-secrets:
+  demo-secrets:

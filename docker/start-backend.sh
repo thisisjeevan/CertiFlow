@@ -6,6 +6,10 @@ if [ -z "${DATABASE_URL:-}" ]; then
     export DATABASE_URL="postgresql://certiflow:$db_password@db:5432/${DATABASE_NAME:-certiflow}"
 fi
 
+if [ -z "${CERTIFICATE_LINK_SECRET:-}" ] && [ -r /run/certificate-secrets/password ]; then
+    export CERTIFICATE_LINK_SECRET="$(cat /run/certificate-secrets/password)"
+fi
+
 case "$1" in
     demo-seed)
         export DEMO_PASSWORD="$(cat /run/demo-secrets/password)"

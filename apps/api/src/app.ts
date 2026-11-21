@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { authRoutes } from './auth/routes.js';
 import { batchRoutes } from './batches/routes.js';
 import { centreRoutes } from './centres/routes.js';
+import { certificateRoutes, verificationRoutes } from './certificates/routes.js';
 import type { ApiConfig } from './config.js';
 import { handleError, notFound, requestId } from './http.js';
 import { notificationRoutes, reviewRoutes } from './workflow/routes.js';
@@ -37,6 +38,8 @@ export function createApp(config: ApiConfig, db: PrismaClient) {
   app.use('/api/batches', batchRoutes(db, config));
   app.use('/api/reviews', reviewRoutes(db, config));
   app.use('/api/notifications', notificationRoutes(db, config));
+  app.use('/api/verify', verificationRoutes(db));
+  app.use('/api/certificates', certificateRoutes(db, config));
   app.use(notFound);
   app.use(handleError);
 

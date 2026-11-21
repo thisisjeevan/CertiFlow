@@ -12,3 +12,4 @@ create_password() {
 
 create_password /run/database-secrets
 create_password /run/demo-secrets
+create_password /run/certificate-secrets

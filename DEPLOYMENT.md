@@ -1,6 +1,6 @@
 # CertiFlow production deployment plan
 
-This plan describes the target workflow and infrastructure. Milestone 1 runs locally with Compose. The sizing figures are starting assumptions to verify with load and failure tests.
+This plan describes the production target. The local Compose workflow now runs approval, PostgreSQL outbox dispatch, private PDF issuance, mock delivery, verification, and revocation. Local certificates use a single-host Docker volume and the mock provider uses PostgreSQL for its receipt ledger. The sizing figures are starting assumptions to verify with load and failure tests.
 
 ## Design load
 

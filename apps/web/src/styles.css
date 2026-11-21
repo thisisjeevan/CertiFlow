@@ -102,3 +102,16 @@ button.reject { color: #85231d; border-color: #b87d77; }
 .history-revision h5, .history-entry { margin: .3rem 0 .6rem; }
 .history-entry, .history-revision h5 { font-size: .9rem; }
 .decision-reason { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.masthead-actions { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; }
+.masthead-actions a { color: white; text-underline-offset: 2px; }
+.public-certificate { max-width: 36rem; margin: 0 auto; }
+.public-certificate h1 { margin-top: .8rem; }
+.public-certificate dd { margin: 0 0 .55rem; }
+.public-certificate dt { font-weight: 650; }
+.certificate-batches { grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); }
+.certificate-details { margin-top: 1rem; }
+.certificate-number { font-family: monospace; overflow-wrap: anywhere; }
+.certificate-details table small { display: block; }
+.certificate-details table a, .public-certificate a { color: #12543e; }
+.revocation-form { padding: .7rem; background: #fbecea; border-radius: .4rem; }

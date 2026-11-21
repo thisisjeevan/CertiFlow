@@ -48,6 +48,14 @@ enum DeliveryStatus {
   PENDING
   DELIVERED
   FAILED
+  CANCELLED
+}
+
+enum DeliveryAttemptOutcome {
+  ACCEPTED
+  REJECTED
+  TIMEOUT_AFTER_ACCEPTANCE
+  RECEIPT_RECOVERED
 }
 
 model District {
@@ -144,6 +152,7 @@ model TrainingCompletion {
   completedOn        DateTime       @db.Date
   passed             Boolean
   candidate          Candidate?
+  certificate        Certificate?
 
   @@unique([centreId, reference])
 }
@@ -191,34 +200,65 @@ model Decision {
 }
 
 model Certificate {
-  id               String            @id @default(uuid()) @db.Uuid
-  number           String            @unique
-  revisionId       String            @db.Uuid
-  candidateId      String            @unique @db.Uuid
-  candidate        RevisionCandidate @relation(fields: [revisionId, candidateId], references: [revisionId, candidateId], onDelete: Restrict)
-  generationStatus GenerationStatus  @default(PENDING)
-  objectKey        String?           @unique
-  issuedAt         DateTime?         @db.Timestamptz(3)
-  revokedAt        DateTime?         @db.Timestamptz(3)
-  revokedById      String?           @db.Uuid
-  revokedBy        User?             @relation(fields: [revokedById], references: [id], onDelete: Restrict)
-  revocationReason String?
-  delivery         MessageDelivery?
-  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+  id                   String              @id @default(uuid()) @db.Uuid
+  number               String              @unique
+  revisionId           String              @db.Uuid
+  candidateId          String              @unique @db.Uuid
+  candidate            RevisionCandidate   @relation(fields: [revisionId, candidateId], references: [revisionId, candidateId], onDelete: Restrict)
+  trainingCompletionId String?             @unique @db.Uuid
+  trainingCompletion   TrainingCompletion? @relation(fields: [trainingCompletionId], references: [id], onDelete: Restrict)
+  generationStatus     GenerationStatus    @default(PENDING)
+  generationAttempts   Int                 @default(0)
+  generationError      String?
+  checksum             String?             @db.Char(64)
+  objectKey            String?             @unique
+  issuedAt             DateTime?           @db.Timestamptz(3)
+  revokedAt            DateTime?           @db.Timestamptz(3)
+  revokedById          String?             @db.Uuid
+  revokedBy            User?               @relation(fields: [revokedById], references: [id], onDelete: Restrict)
+  revocationReason     String?
+  delivery             MessageDelivery?
+  createdAt            DateTime            @default(now()) @db.Timestamptz(3)
 
   @@unique([revisionId, candidateId])
 }
 
 model MessageDelivery {
-  id              String         @id @default(uuid()) @db.Uuid
-  certificateId   String         @unique @db.Uuid
-  certificate     Certificate    @relation(fields: [certificateId], references: [id], onDelete: Restrict)
-  idempotencyKey  String         @unique
-  status          DeliveryStatus @default(PENDING)
-  attempts        Int            @default(0)
-  providerReceipt String?        @unique
-  deliveredAt     DateTime?      @db.Timestamptz(3)
-  createdAt       DateTime       @default(now()) @db.Timestamptz(3)
+  id              String               @id @default(uuid()) @db.Uuid
+  certificateId   String               @unique @db.Uuid
+  certificate     Certificate          @relation(fields: [certificateId], references: [id], onDelete: Restrict)
+  idempotencyKey  String               @unique
+  status          DeliveryStatus       @default(PENDING)
+  attempts        Int                  @default(0)
+  providerReceipt String?              @unique
+  deliveredAt     DateTime?            @db.Timestamptz(3)
+  nextAttemptAt   DateTime?            @db.Timestamptz(3)
+  lastError       String?
+  createdAt       DateTime             @default(now()) @db.Timestamptz(3)
+  history         DeliveryAttempt[]
+  mockMessage     MockWhatsAppMessage?
+}
+
+model DeliveryAttempt {
+  id         BigInt                 @id @default(autoincrement())
+  deliveryId String                 @db.Uuid
+  delivery   MessageDelivery        @relation(fields: [deliveryId], references: [id], onDelete: Restrict)
+  attempt    Int
+  outcome    DeliveryAttemptOutcome
+  errorCode  String?
+  createdAt  DateTime               @default(now()) @db.Timestamptz(3)
+
+  @@unique([deliveryId, attempt])
+}
+
+model MockWhatsAppMessage {
+  id             String          @id @default(uuid()) @db.Uuid
+  deliveryId     String          @unique @db.Uuid
+  delivery       MessageDelivery @relation(fields: [deliveryId], references: [id], onDelete: Restrict)
+  idempotencyKey String          @unique
+  grantDigest    String          @unique @db.Char(64)
+  expiresAt      DateTime        @db.Timestamptz(3)
+  acceptedAt     DateTime        @default(now()) @db.Timestamptz(3)
 }
 
 model AuditEvent {

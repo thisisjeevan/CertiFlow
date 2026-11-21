@@ -1,10 +1,17 @@
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { readWorkerConfig } from './config.js';
+import { startCertification } from './certificates/dispatcher.js';
 import { connectDatabase } from './db.js';
 
 const config = readWorkerConfig();
+if (!config.CERTIFICATE_LINK_SECRET) throw new Error('CERTIFICATE_LINK_SECRET is required for the worker');
 const db = connectDatabase(config.DATABASE_URL);
+const certification = startCertification(db, {
+  redisUrl: config.REDIS_URL, prefix: config.CERTIFICATION_QUEUE_PREFIX,
+  directory: config.CERTIFICATE_STORAGE, origin: config.APP_ORIGIN,
+  linkSecret: config.CERTIFICATE_LINK_SECRET, mockMode: config.MOCK_WHATSAPP_MODE,
+}, report);
 const connection = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
 const queueName = 'maintenance';
 const sweepJob = 'expire-sessions';
@@ -42,6 +49,7 @@ async function shutdown() {
   const timeout = setTimeout(() => process.exit(1), 10_000);
   timeout.unref();
   try {
+    await certification.stop();
     await worker.close();
     await queue.close();
     connection.disconnect();

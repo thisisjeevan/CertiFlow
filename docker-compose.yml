@@ -28,6 +28,7 @@ services:
       - ./docker/init-secrets.sh:/init-secrets.sh:ro
       - database-secrets:/run/database-secrets
       - demo-secrets:/run/demo-secrets
+      - certificate-secrets:/run/certificate-secrets
 
   db:
     image: postgres:17-alpine
@@ -90,6 +91,11 @@ services:
       NODE_ENV: development
       APP_ORIGIN: http://localhost:${CERTIFLOW_PORT:-8080}
       TRUST_PROXY_HOPS: "1"
+      CERTIFICATE_STORAGE: /var/lib/certiflow/certificates
+    volumes:
+      - database-secrets:/run/database-secrets:ro
+      - certificate-secrets:/run/certificate-secrets:ro
+      - certificate-files:/var/lib/certiflow/certificates:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
@@ -105,6 +111,13 @@ services:
         condition: service_healthy
     environment:
       REDIS_URL: redis://redis:6379
+      APP_ORIGIN: http://localhost:${CERTIFLOW_PORT:-8080}
+      CERTIFICATE_STORAGE: /var/lib/certiflow/certificates
+      MOCK_WHATSAPP_MODE: ${MOCK_WHATSAPP_MODE:-mixed}
+    volumes:
+      - database-secrets:/run/database-secrets:ro
+      - certificate-secrets:/run/certificate-secrets:ro
+      - certificate-files:/var/lib/certiflow/certificates
     command: ["node", "apps/api/dist/worker.js"]
 
   web:
@@ -123,14 +136,26 @@ services:
       retries: 12
     restart: unless-stopped
 
+  test-redis:
+    image: redis:7-alpine
+    profiles: [test]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
   tests:
     <<: *tools
     profiles: [test]
     depends_on:
       db:
         condition: service_healthy
+      test-redis:
+        condition: service_healthy
     environment:
       DATABASE_NAME: certiflow_test
+      TEST_REDIS_URL: redis://test-redis:6379
       NODE_ENV: test
     command: ["test"]
 
@@ -139,3 +164,5 @@ volumes:
   redis-data:
   database-secrets:
   demo-secrets:
+  certificate-secrets:
+  certificate-files:

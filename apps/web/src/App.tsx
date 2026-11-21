@@ -3,6 +3,8 @@ import { ApiError, apiRequest, errorMessage, postJson, type Centre, type Role, t
 import { TrainingBatches } from './TrainingBatches';
 import { ReviewWorkspace } from './ReviewWorkspace';
 import { Notifications } from './Notifications';
+import { CertificateWorkspace } from './CertificateWorkspace';
+import { CandidateDownload, PublicVerification } from './PublicCertificate';
 
 const roles: Record<Role, string> = {
   TRAINING_CENTRE: 'Training centre',
@@ -92,7 +94,7 @@ function CentreDirectory({ user, onSessionExpired }: { user: User; onSessionExpi
   );
 }
 
-export function App() {
+function StaffApp() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState('');
@@ -134,11 +136,14 @@ export function App() {
             <strong>CertiFlow</strong>
             <span>Pragati Skills Mission</span>
           </div>
+          <nav aria-label="CertiFlow" className="masthead-actions">
+            <a href="/verify">Verify a certificate</a>
           {user && (
             <button className="secondary" onClick={signOut} disabled={signingOut}>
               {signingOut ? 'Signing out…' : 'Sign out'}
             </button>
           )}
+          </nav>
         </div>
       </header>
       <main>
@@ -150,9 +155,19 @@ export function App() {
             {user.role === 'TRAINING_CENTRE' ? (
               user.centreId && <TrainingBatches centreId={user.centreId} onSessionExpired={endSession} />
             ) : <ReviewWorkspace role={user.role} onSessionExpired={endSession} />}
+            {(user.role === 'STATE_OFFICER' || user.role === 'TRAINING_CENTRE') && (
+              <CertificateWorkspace stateOfficer={user.role === 'STATE_OFFICER'} onSessionExpired={endSession} />
+            )}
           </div>
         ) : <SignIn onSignIn={(signedInUser) => { setNotice(''); setUser(signedInUser); }} />}
       </main>
     </>
   );
+}
+
+export function App() {
+  const [, page, identifier = ''] = window.location.pathname.split('/');
+  if (page === 'verify') return <PublicVerification initialNumber={identifier} />;
+  if (page === 'download') return <CandidateDownload id={identifier} />;
+  return <StaffApp />;
 }

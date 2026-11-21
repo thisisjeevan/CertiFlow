@@ -35,7 +35,7 @@ The final workflow must demonstrate all six scenarios.
 - **Web** uses React, Vite, and TypeScript. nginx serves the built frontend and proxies the API on the same origin.
 - **API** is an Express TypeScript modular monolith. Auth stores a SHA-256 digest of a random session token in PostgreSQL and sends the original in an HttpOnly, SameSite cookie. Production configuration requires HTTPS. Passwords use salted scrypt. The centre directory filters access in database queries using the current account’s role and scope. A liveness probe tests HTTP and a readiness probe tests the migrated database.
 - **Database** uses PostgreSQL and Prisma Migrate. The checked-in migrations create ownership and revision foreign keys, uniqueness across decisions and certificates, and SQL checks for role assignment and state-dependent metadata. Approval, PDF generation, and delivery have separate statuses. A centre-scoped completion register validates imported candidates. A unique claim prevents two batches from reusing the same training completion.
-- **Worker** is a separate process from the backend package. BullMQ uses Redis for coordination and currently runs an idempotent session-expiry sweep. Expired sessions are refused immediately by the API. Redis can go offline while the API continues serving requests.
+- **Worker** is a separate process from the backend package. BullMQ uses Redis for certificate processing and the session-expiry sweep. PostgreSQL tracks unfinished certificate work, so the API can approve batches and verify certificates while Redis is unavailable.
 - **Batch workflow** uses the same PostgreSQL centre row lock for imports, submissions, reviewer decisions, and opening corrections. Each draft write checks its version. A reviewer decision targets the current revision and stage. Transactions commit decisions, status transitions, audit records, outbox records, and relevant notifications together. The [deployment plan](DEPLOYMENT.md) describes how future workers will consume committed events and reconcile unfinished work.
 
 | Endpoint | Purpose |
@@ -60,6 +60,12 @@ The final workflow must demonstrate all six scenarios.
 | GET `/api/reviews/:batchId/timeline` | Retrieve scoped revision history, decisions, and attributed audit records. |
 | GET `/api/notifications` | List the signed-in account’s latest 50 notifications. |
 | PATCH `/api/notifications/:id/read` | Mark an owned notification read. Send an empty JSON object. |
+| GET `/api/certificates/batches` | Read issuance and delivery counts for approved batches. State officers see all batches. Training centres see their own. |
+| GET `/api/certificates/batches/:revisionId` | Read certificate and delivery status for a scoped approved revision. |
+| GET `/api/certificates/batches/:revisionId/mock-messages` | State-only mock receipts, attempt histories, and available candidate links. |
+| GET `/api/verify/:number` | Public, rate-limited verification against PostgreSQL. |
+| GET `/api/certificates/:certificateId/download` | Stream a private PDF with the bearer grant from the candidate link. |
+| POST `/api/certificates/:certificateId/revoke` | Revoke an issued certificate as a state officer. Send JSON with a reason. |
 
 ## Run from a fresh clone
 
@@ -96,11 +102,11 @@ docker compose logs worker
 docker compose --profile test run --rm --build tests
 ```
 
-The test container migrates `certiflow_test` and runs Vitest/Supertest unit and PostgreSQL integration tests. Integration files run sequentially because the test database shares global reviewer roles. Concurrency tests still run overlapping HTTP requests and observe them waiting on a real database lock. The demo database is separate. Use `docker compose down` to stop the project while retaining data.
+The test container migrates `certiflow_test` and runs Vitest/Supertest against PostgreSQL and a dedicated Redis service. Integration files run sequentially because the test database shares global reviewer roles. Concurrency tests still run overlapping HTTP requests and observe them waiting on a real database lock. The demo database is separate. Use `docker compose down` to stop the project while retaining data.
 
 ### Optional native development
 
-Install Node.js 22.18+ on the 22.x line or a current Node.js 24.x release, and have PostgreSQL and Redis available. Copy `.env.example` to `.env`, set the PostgreSQL URL and a local demo password of at least 16 characters, and adjust the Redis URL if needed.
+Install Node.js 22.18+ on the 22.x line or a current Node.js 24.x release, and have PostgreSQL and Redis available. Copy `.env.example` to `.env`. Set the PostgreSQL URL, a local demo password of at least 16 characters, and a randomly generated `CERTIFICATE_LINK_SECRET` of at least 32 characters. Use the same secret and `CERTIFICATE_STORAGE` directory for API and worker. Adjust the Redis URL if needed.
 
 ```powershell
 npm ci
@@ -112,7 +118,7 @@ npm run db:migrate
 npm run db:seed
 ```
 
-In separate terminals, run `npm run dev:api`, `npm run dev:worker`, and `npm run dev:web`. Open [http://localhost:5173](http://localhost:5173). For native PostgreSQL integration tests, use a dedicated database whose name ends in `_test`. In a separate terminal set `DATABASE_URL` and `TEST_DATABASE_URL` to that database URL, then run `npm run db:migrate` followed by `npm run test:integration`.
+In separate terminals, run `npm run dev:api`, `npm run dev:worker`, and `npm run dev:web`. Open [http://localhost:5173](http://localhost:5173). For native PostgreSQL integration tests, use a dedicated database whose name ends in `_test`. In a separate terminal set `DATABASE_URL` and `TEST_DATABASE_URL` to that database URL and point `TEST_REDIS_URL` to a dedicated Redis instance. Run `npm run build`, `npm run db:migrate`, and `npm run test:integration`. The worker-restart test launches the built worker in a child process.
 
 ## Batch intake and CSV template
 
@@ -158,7 +164,7 @@ Decision bodies use stage `DISTRICT`, `QUALITY`, or `STATE` and outcome `APPROVE
 
 The first eligible transaction to acquire the centre lock decides the outcome of a conflicting action. The next request checks the latest revision and stage under that lock. A valid concurrent second district approval is preserved and advances the state once. Duplicate votes, stale revisions, and closed or incompatible stages return HTTP 409. One new revision can be opened from a return. Its copied roster can be replaced using the CSV import endpoint, and PostgreSQL preserves the original roster. Prior decisions remain visible in history. Pending reviews stay actionable until they move, close, or are superseded. The 24-hour escalation policy will be handled by a later milestone.
 
-Each decision writes `BATCH_REVIEW_DECISION` and `batch.review_decision_recorded`. Stage transitions also write `BATCH_REVIEW_TRANSITION` and a unique `batch.transition:<revisionId>:<previousStatus>` outbox key. Final state approval uses event type `batch.approved`, with batch ID, revision ID, centre ID, deciding actor, timestamp, and candidate count for Milestone 4. Submission notifies the district. Each subsequent transition notifies the originating centre and any next-stage reviewers. In-app notifications persist with per-account deduplication and support marking read.
+Each decision writes `BATCH_REVIEW_DECISION` and `batch.review_decision_recorded`. Stage transitions also write `BATCH_REVIEW_TRANSITION` and a unique `batch.transition:<revisionId>:<previousStatus>` outbox key. Final state approval uses event type `batch.approved`, with batch ID, revision ID, centre ID, deciding actor, timestamp, and candidate count for the certificate worker. Submission notifies the district. Each subsequent transition notifies the originating centre and any next-stage reviewers. In-app notifications persist with per-account deduplication and support marking read.
 
 ### Try the approval flow
 
@@ -168,9 +174,23 @@ Each decision writes `BATCH_REVIEW_DECISION` and `batch.review_decision_recorded
 
 Seed runs preserve existing review progress. The review workspace shows the oldest 100 decisions waiting for the signed-in reviewer. Refresh the queue or notifications to see changes from other accounts.
 
-## Milestone 3 scope
+## Certificate issuance and mock delivery
 
-Batch intake and review cover scenarios A, B and F. XLSX uploads, certificate issuance and PDF download, mock WhatsApp delivery, public verification and revocation, escalation processing, outbox consumption, and SSE remain pending. Local login limiting applies per API process. Production will need shared rate limiting, staff account provisioning, and database credentials with limited privileges.
+1. Approve **Digital Skills** through district, quality, and state review. In Farah’s **Approved batches and certificates** workspace, refresh until the batch shows 60 issued and 60 delivered.
+2. Open the batch and select **View simulated WhatsApp messages**. Each receipt shows the attempt history and an expiring candidate link. The link opens a private PDF download page.
+3. Verify the certificate using its number or the QR code. Revoke it with a reason in the state workspace, then repeat verification. New requests see the committed revocation.
+
+The PostgreSQL dispatcher leases only `batch.approved`, `certificate.generate`, and `certificate.deliver` events. It sends BullMQ jobs with IDs derived from the outbox IDs. Acknowledgement happens when the handler commits its effects. Leases expire and make unfinished work eligible for publication again after a worker crash, failed publish, or Redis data loss. Earlier approval events remain available for audit and future consumers. [BullMQ job IDs](https://docs.bullmq.io/guide/jobs/job-ids)
+
+Each eligible training completion, candidate, and 160-bit certificate number has a database uniqueness constraint. PDFKit writes the certificate to a deterministic private filename using an atomic rename. A retry can recover a complete on-disk file after a crash before metadata commit. The certificate row stores its SHA-256 checksum. The worker has write access to the `certificate-files` Compose volume. The API has read-only access. The QR code points to the configured application origin. The Compose demo uses localhost, so open the QR URL on the demo host. [PDFKit text and fonts](https://pdfkit.org/docs/text.html) · [node-qrcode](https://github.com/soldair/node-qrcode)
+
+The mock provider commits one durable acceptance per idempotency key. The worker acknowledges the receipt in a separate transaction. After timeout or interruption, a retry can recover that receipt. A rejected attempt is retried with bounded exponential backoff, up to five provider attempts. The default `MOCK_WHATSAPP_MODE=mixed` gives candidates whose numeric references end in 0 or 5 one rejection and those ending in 1 or 6 one timeout after acceptance. Other modes are `success`, `reject_once`, `timeout_after_acceptance`, and `reject_always`. A real provider’s delivery guarantees depend on its idempotency and reconciliation capabilities.
+
+Candidate grants expire after 24 hours. The mock ledger stores a digest, and the state-only inbox derives the link with the secret from the `certificate-secrets` volume. The URL puts the bearer token in its fragment. The download page submits it in the Authorization header. Public verification exposes the number, course, centre, issue date, and current validity for a valid certificate. Every download checks the grant and current revocation state. Revocation keeps completed mock receipts for audit and cancels pending delivery.
+
+## Milestone 4 scope
+
+CertiFlow covers scenarios A, B, C, D, and F. Scheduled review escalation and SSE remain pending. Certificate progress uses manual refresh. The local PDF volume is shared by processes on the same Docker host. Multi-host deployments need shared private object storage. Terminal generation and delivery failures are visible to staff. Manual resends and grant renewal are pending. Verification and download rate limiting applies per API process.
 
 The lockfile pins Prisma’s transitive Effect dependency to a patched 3.x release.
 

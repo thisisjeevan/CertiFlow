@@ -1,22 +1,16 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ApiError, apiRequest, errorMessage, postJson, type FieldIssue } from './api';
 
-const statusLabels = {
-  DRAFT: 'Draft',
-  DISTRICT_REVIEW: 'District review',
-  QUALITY_REVIEW: 'Quality review',
-  STATE_REVIEW: 'State review',
-  APPROVED: 'Approved',
-  RETURNED: 'Returned',
-  REJECTED: 'Rejected',
-};
+import { WorkflowHistory, statusLabels, type RevisionStatus } from './WorkflowHistory';
 
 interface BatchSummary {
   id: string;
   courseName: string;
   revision: {
+    id: string;
+    revision: number;
     version: string;
-    status: keyof typeof statusLabels;
+    status: RevisionStatus;
     candidateCount: number;
   } | null;
 }
@@ -188,6 +182,16 @@ export function TrainingBatches({ centreId, onSessionExpired }: {
     });
   }
 
+  function correctBatch(batch: BatchDetails) {
+    if (!batch.revision) return;
+    const revisionId = batch.revision.id;
+    void perform(async () => {
+      const corrected = await postJson<BatchResponse>('/api/batches/' + batch.id + '/correction', { revisionId });
+      showBatch(corrected.batch);
+      setSuccess('Correction draft opened. Review the roster before resubmitting.');
+    });
+  }
+
   const isDraft = selected?.revision?.status === 'DRAFT';
   return (
     <section className="batch-workspace" aria-labelledby="batches-title">
@@ -210,7 +214,7 @@ export function TrainingBatches({ centreId, onSessionExpired }: {
                     <strong>{batch.courseName}</strong>
                     <small>
                       {batch.revision ? statusLabels[batch.revision.status] : 'No revision'}
-                      {' · '}{batch.revision?.candidateCount ?? 0} candidates · {batch.id.slice(0, 8)}
+                      {' · '}{batch.revision?.candidateCount ?? 0} candidates · {batch.id.slice(-8)}
                     </small>
                   </button>
                 </li>
@@ -228,19 +232,29 @@ export function TrainingBatches({ centreId, onSessionExpired }: {
               <div className="batch-detail-heading">
                 <div>
                   <h3>{selected.courseName}</h3>
-                  <p className="role">{selected.revision ? statusLabels[selected.revision.status] : 'No revision'}</p>
+                  <p className="role">{selected.revision
+                    ? 'Revision ' + selected.revision.revision + ' · ' + statusLabels[selected.revision.status]
+                    : 'No revision'}</p>
                 </div>
                 <button type="button" className="outline" onClick={() => openBatch(selected.id)} disabled={busy}>Reload batch</button>
               </div>
 
+              {selected.revision?.status === 'RETURNED' && (
+                <button type="button" className="start-correction" disabled={busy}
+                  onClick={() => correctBatch(selected)}>Start correction</button>
+              )}
+              {selected.revision && (!isDraft || selected.revision.revision > 1) && (
+                <WorkflowHistory key={'history:' + selected.id} batch={selected} onSessionExpired={onSessionExpired} />
+              )}
+
               {isDraft && (
                 <div className="draft-forms" key={selected.id}>
-                  <form onSubmit={saveCourse}>
+                  {selected.revision?.revision === 1 && <form onSubmit={saveCourse}>
                     <label htmlFor="edit-course">Edit course name</label>
                     <input id="edit-course" name="courseName" key={selected.courseName}
                       defaultValue={selected.courseName} maxLength={120} required />
                     <button type="submit" className="outline" disabled={busy}>Save course</button>
-                  </form>
+                  </form>}
 
                   <form onSubmit={upload}>
                     <label htmlFor="candidate-csv">Candidate CSV</label>
@@ -261,7 +275,7 @@ export function TrainingBatches({ centreId, onSessionExpired }: {
               {isDraft && (
                 <div className="submit-batch">
                   <button type="button" disabled={busy || selected.candidates.length === 0} onClick={submitForReview}>
-                    Submit for district review
+                    {selected.revision && selected.revision.revision > 1 ? 'Resubmit for district review' : 'Submit for district review'}
                   </button>
                   <small>Submission freezes the roster for review.</small>
                 </div>

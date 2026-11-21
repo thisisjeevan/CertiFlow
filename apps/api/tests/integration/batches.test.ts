@@ -84,6 +84,7 @@ afterAll(async () => {
       const batchIds = batches.map(({ id }) => id);
       const revisions = await tx.batchRevision.findMany({ where: { batchId: { in: batchIds } }, select: { id: true } });
       await tx.outboxEvent.deleteMany({ where: { aggregateId: { in: batchIds } } });
+      await tx.notification.deleteMany({ where: { resourceId: { in: batchIds } } });
       await tx.auditEvent.deleteMany({ where: { resourceType: 'BatchRevision', resourceId: { in: revisions.map(({ id }) => id) } } });
       await tx.revisionCandidate.deleteMany({ where: { batchId: { in: batchIds } } });
       await tx.candidate.deleteMany({ where: { batchId: { in: batchIds } } });

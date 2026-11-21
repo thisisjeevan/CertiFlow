@@ -2,6 +2,7 @@ import { Role } from './generated/prisma/client.js';
 import { hashPassword } from './auth/password.js';
 import { readSeedConfig } from './config.js';
 import { connectDatabase } from './db.js';
+import { seedReviewBatches } from './workflow/demo-batches.js';
 
 const config = readSeedConfig();
 const db = connectDatabase(config.DATABASE_URL);
@@ -76,6 +77,8 @@ async function seed() {
         create: { ...profile, id: account.id, email: account.email },
       });
     }
+    const owner = await tx.user.findUniqueOrThrow({ where: { email: 'anika@demo.certiflow.test' }, select: { id: true } });
+    await seedReviewBatches(tx, { id: owner.id, centreId: anikaCentreId });
   });
 
   console.info(JSON.stringify({ event: 'demo_seeded', accountCount: accounts.length }));

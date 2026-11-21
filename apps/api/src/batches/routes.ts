@@ -6,13 +6,14 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 import { HttpError, requireSameOriginType } from '../http.js';
 import { csvByteLimit } from './csv.js';
 import {
-  createBatch, editBatch, getBatch, importCandidates, listBatches, submitBatch, type CentreOwner,
+  createBatch, editBatch, getBatch, importCandidates, listBatches, startCorrection, submitBatch, type CentreOwner,
 } from './service.js';
 
 const courseName = z.string().trim().min(1).max(120).regex(/^[^\p{Cc}\p{Zl}\p{Zp}]+$/u);
 const createBody = z.strictObject({ centreId: z.uuid().transform((id) => id.toLowerCase()), courseName });
 const editBody = z.strictObject({ courseName });
 const submitBody = z.strictObject({});
+const correctionBody = z.strictObject({ revisionId: z.uuid().transform((id) => id.toLowerCase()) });
 
 function owner(req: Request): CentreOwner {
   const principal = getPrincipal(req);
@@ -75,6 +76,13 @@ export function batchRoutes(db: PrismaClient, config: ApiConfig) {
     if (!Buffer.isBuffer(req.body)) throw new HttpError(400, 'INVALID_CSV', 'Choose a UTF-8 CSV file.');
     const batch = await importCandidates(db, owner(req), batchId(req), draftVersion(req), req.body);
     res.json({ batch });
+  });
+
+  router.post('/:id/correction', json, async (req, res) => {
+    const input = correctionBody.safeParse(req.body);
+    if (!input.success) throw new HttpError(400, 'INVALID_CORRECTION', 'Provide the returned revision ID.');
+    const batch = await startCorrection(db, owner(req), batchId(req), input.data.revisionId);
+    res.status(201).json({ batch });
   });
 
   router.post('/:id/submit', json, async (req, res) => {

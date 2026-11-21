@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ApiError, apiRequest, errorMessage, postJson, type Centre, type Role, type User } from './api';
 import { TrainingBatches } from './TrainingBatches';
+import { ReviewWorkspace } from './ReviewWorkspace';
+import { Notifications } from './Notifications';
 
 const roles: Record<Role, string> = {
   TRAINING_CENTRE: 'Training centre',
@@ -144,9 +146,10 @@ export function App() {
         {loading ? <p role="status">Loading your session…</p> : user ? (
           <div key={user.id}>
             <CentreDirectory user={user} onSessionExpired={endSession} />
-            {user.role === 'TRAINING_CENTRE' && user.centreId && (
-              <TrainingBatches centreId={user.centreId} onSessionExpired={endSession} />
-            )}
+            <Notifications onSessionExpired={endSession} />
+            {user.role === 'TRAINING_CENTRE' ? (
+              user.centreId && <TrainingBatches centreId={user.centreId} onSessionExpired={endSession} />
+            ) : <ReviewWorkspace role={user.role} onSessionExpired={endSession} />}
           </div>
         ) : <SignIn onSignIn={(signedInUser) => { setNotice(''); setUser(signedInUser); }} />}
       </main>

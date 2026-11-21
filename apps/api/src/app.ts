@@ -6,6 +6,7 @@ import { batchRoutes } from './batches/routes.js';
 import { centreRoutes } from './centres/routes.js';
 import type { ApiConfig } from './config.js';
 import { handleError, notFound, requestId } from './http.js';
+import { notificationRoutes, reviewRoutes } from './workflow/routes.js';
 
 export function createApp(config: ApiConfig, db: PrismaClient) {
   const app = express();
@@ -34,6 +35,8 @@ export function createApp(config: ApiConfig, db: PrismaClient) {
   app.use('/api/auth', authRoutes(db, config));
   app.use('/api/centres', centreRoutes(db));
   app.use('/api/batches', batchRoutes(db, config));
+  app.use('/api/reviews', reviewRoutes(db, config));
+  app.use('/api/notifications', notificationRoutes(db, config));
   app.use(notFound);
   app.use(handleError);
 

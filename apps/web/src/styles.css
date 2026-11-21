@@ -82,3 +82,23 @@ button.outline:hover { background: #e6f1eb; }
 @media (max-width: 700px) {
   .batch-layout { grid-template-columns: minmax(0, 1fr); }
 }
+
+.notifications { margin-top: 1rem; max-width: 44rem; }
+.notifications summary, .review-roster summary { cursor: pointer; font-weight: 650; color: #20493c; }
+.notifications > button { margin-top: .75rem; }
+.notifications ul { list-style: none; padding: 0; margin-bottom: 0; }
+.notifications li { display: flex; gap: .75rem; justify-content: space-between; align-items: start; padding: .65rem 0; border-top: 1px solid #e0e8e4; }
+.notifications small, .history-entry small { display: block; color: #405751; }
+.review-layout, .start-correction { margin-top: 1rem; }
+.review-actions { display: grid; gap: .55rem; margin: 1rem 0; }
+.review-actions textarea { width: 100%; resize: vertical; padding: .55rem .7rem; font: inherit; border: 1px solid #879f96; border-radius: .4rem; }
+.action-buttons { display: flex; flex-wrap: wrap; gap: .55rem; }
+button.reject { color: #85231d; border-color: #b87d77; }
+.review-roster { margin: 1rem 0; }
+.review-roster ul { max-height: 14rem; overflow: auto; }
+.workflow-history { margin: 1rem 0; }
+.workflow-history h4 { margin: 0 0 .55rem; }
+.history-revision { border-top: 1px solid #e0e8e4; padding: .55rem 0; }
+.history-revision h5, .history-entry { margin: .3rem 0 .6rem; }
+.history-entry, .history-revision h5 { font-size: .9rem; }
+.decision-reason { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -36,7 +36,7 @@ The final workflow must demonstrate all six scenarios.
 - **API** is an Express TypeScript modular monolith. Auth stores a SHA-256 digest of a random session token in PostgreSQL and sends the original in an HttpOnly, SameSite cookie. Production configuration requires HTTPS. Passwords use salted scrypt. The centre directory filters access in database queries using the current account’s role and scope. A liveness probe tests HTTP and a readiness probe tests the migrated database.
 - **Database** uses PostgreSQL and Prisma Migrate. The checked-in migrations create ownership and revision foreign keys, uniqueness across decisions and certificates, and SQL checks for role assignment and state-dependent metadata. Approval, PDF generation, and delivery have separate statuses. A centre-scoped completion register validates imported candidates. A unique claim prevents two batches from reusing the same training completion.
 - **Worker** is a separate process from the backend package. BullMQ uses Redis for coordination and currently runs an idempotent session-expiry sweep. Expired sessions are refused immediately by the API. Redis can go offline while the API continues serving requests.
-- **Batch submission** commits the transition to district review, the attributed audit entry, and the outbox event in one transaction. A PostgreSQL row lock on the centre serializes its writes, including completion claims across its batches. Each draft write checks the version returned by the last read. The [deployment plan](DEPLOYMENT.md) describes how future workers will consume committed events and reconcile unfinished work.
+- **Batch workflow** uses the same PostgreSQL centre row lock for imports, submissions, reviewer decisions, and opening corrections. Each draft write checks its version. A reviewer decision targets the current revision and stage. Transactions commit decisions, status transitions, audit records, outbox records, and relevant notifications together. The [deployment plan](DEPLOYMENT.md) describes how future workers will consume committed events and reconcile unfinished work.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -53,6 +53,13 @@ The final workflow must demonstrate all six scenarios.
 | PATCH `/api/batches/:id` | Update the initial draft’s course with JSON `courseName`. |
 | PUT `/api/batches/:id/candidates` | Replace the draft roster. Send the UTF-8 CSV bytes as `text/csv`. |
 | POST `/api/batches/:id/submit` | Submit the validated draft to district review. Send an empty JSON object. |
+| POST `/api/batches/:id/correction` | Open the next draft from the current returned revision. Send its `revisionId` in JSON. |
+| GET `/api/reviews` | List pending reviews for the current reviewer and their scope. |
+| GET `/api/reviews/:batchId` | View the latest submitted revision visible to the reviewer, its roster, and decision eligibility. |
+| POST `/api/reviews/:batchId/revisions/:revisionId/decisions` | Record a review decision with JSON `stage`, `outcome`, and `reason` where required. |
+| GET `/api/reviews/:batchId/timeline` | Retrieve scoped revision history, decisions, and attributed audit records. |
+| GET `/api/notifications` | List the signed-in account’s latest 50 notifications. |
+| PATCH `/api/notifications/:id/read` | Mark an owned notification read. Send an empty JSON object. |
 
 ## Run from a fresh clone
 
@@ -64,7 +71,7 @@ docker compose up --build --wait
 
 Open [http://localhost:8080](http://localhost:8080). If port 8080 is busy, set `$env:CERTIFLOW_PORT = '8081'` before the Compose command and use localhost on that port. Use `localhost` as the hostname so the application origin matches the browser.
 
-Startup creates local credentials in Docker volumes, applies the migrations, and seeds the demo accounts and completion register. Use the following command to retrieve the shared, randomly generated demo password from your local Docker project.
+Startup creates local credentials in Docker volumes, applies the migrations, and seeds the demo accounts, completion register, and two submitted review batches. Use the following command to retrieve the shared, randomly generated demo password from your local Docker project.
 
 ```powershell
 docker compose run --rm --no-deps --entrypoint cat seed /run/demo-secrets/password
@@ -89,7 +96,7 @@ docker compose logs worker
 docker compose --profile test run --rm --build tests
 ```
 
-The test container migrates `certiflow_test` and runs Vitest/Supertest unit and PostgreSQL integration tests. The demo database is separate. Use `docker compose down` to stop the project while retaining data.
+The test container migrates `certiflow_test` and runs Vitest/Supertest unit and PostgreSQL integration tests. Integration files run sequentially because the test database shares global reviewer roles. Concurrency tests still run overlapping HTTP requests and observe them waiting on a real database lock. The demo database is separate. Use `docker compose down` to stop the project while retaining data.
 
 ### Optional native development
 
@@ -134,9 +141,36 @@ Changing the initial draft’s course preserves the roster. Submission revalidat
 
 The demo completion references remain assigned after submission. Use a separate set of provisioned completions or a fresh demo database to repeat the full demonstration.
 
-## Milestone 2 scope
+## Approval workflow
 
-Batch intake delivers scenario A, including tested rollback and competing writes. The district approval engine and returned-batch correction flow come next. XLSX uploads, PDF generation and download, mock WhatsApp, public verification and revocation, escalations, workflow-event processing, and SSE are pending. Local login limiting applies per API process. Production will need shared rate limiting, staff account provisioning, and database credentials with limited privileges.
+| Current state | Valid decision or action | Result |
+| --- | --- | --- |
+| District review | First district officer approves | Remains in district review |
+| District review | Second distinct officer approves | Quality review for 50 or more candidates, state review for 1 to 49 |
+| Quality review | Quality reviewer approves | State review |
+| State review | State officer approves | Approved |
+| Any active review stage | Authorized reviewer returns the revision with a reason | Returned |
+| Any active review stage | Authorized reviewer rejects the revision with a reason | Rejected and closed |
+| Returned | Originating centre opens a correction | New draft revision with a copy of the roster |
+| Correction draft | Originating centre submits a valid roster | District review with fresh votes |
+
+Decision bodies use stage `DISTRICT`, `QUALITY`, or `STATE` and outcome `APPROVE`, `RETURN`, or `REJECT`. Return and rejection reasons must contain 1–500 characters after trimming. The session supplies the actor. A reviewer can record one decision per stage and revision. District officers see submitted history in their district. Quality and state reviewers see revisions that reached their stage. The originating centre sees its complete history, including correction drafts and return reasons. Reviewer roster responses include participant references and names. Candidate phone numbers stay in the centre workspace.
+
+The first eligible transaction to acquire the centre lock decides the outcome of a conflicting action. The next request checks the latest revision and stage under that lock. A valid concurrent second district approval is preserved and advances the state once. Duplicate votes, stale revisions, and closed or incompatible stages return HTTP 409. One new revision can be opened from a return. Its copied roster can be replaced using the CSV import endpoint, and PostgreSQL preserves the original roster. Prior decisions remain visible in history. Pending reviews stay actionable until they move, close, or are superseded. The 24-hour escalation policy will be handled by a later milestone.
+
+Each decision writes `BATCH_REVIEW_DECISION` and `batch.review_decision_recorded`. Stage transitions also write `BATCH_REVIEW_TRANSITION` and a unique `batch.transition:<revisionId>:<previousStatus>` outbox key. Final state approval uses event type `batch.approved`, with batch ID, revision ID, centre ID, deciding actor, timestamp, and candidate count for Milestone 4. Submission notifies the district. Each subsequent transition notifies the originating centre and any next-stage reviewers. In-app notifications persist with per-account deduplication and support marking read.
+
+### Try the approval flow
+
+- **Electrical Safety** starts in district review with three candidates. Approve as Dev and Meera, then give final approval as Farah.
+- **Digital Skills** starts in district review with 60 candidates. Approve as Dev and Meera, approve quality review as Neha, then give final approval as Farah.
+- To demonstrate corrections, return a revision with a reason. Sign in as Anika, open the correction, adjust the roster if needed, and resubmit. The original decision history stays visible.
+
+Seed runs preserve existing review progress. The review workspace shows the oldest 100 decisions waiting for the signed-in reviewer. Refresh the queue or notifications to see changes from other accounts.
+
+## Milestone 3 scope
+
+Batch intake and review cover scenarios A, B and F. XLSX uploads, certificate issuance and PDF download, mock WhatsApp delivery, public verification and revocation, escalation processing, outbox consumption, and SSE remain pending. Local login limiting applies per API process. Production will need shared rate limiting, staff account provisioning, and database credentials with limited privileges.
 
 The lockfile pins Prisma’s transitive Effect dependency to a patched 3.x release.
 

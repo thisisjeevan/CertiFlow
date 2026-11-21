@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma, type PrismaClient } from '../generated/prisma/client.js';
 import { HttpError } from '../http.js';
+import { notifyWorkflow } from '../workflow/events.js';
+import { withWorkflowWrite } from '../workflow/write.js';
 import { isCandidateName, isCandidatePhone, isReference, readCandidateCsv } from './csv.js';
 
 export interface CentreOwner {
@@ -90,23 +92,15 @@ function requireDraft(revision: Revision) {
   }
 }
 
-async function withCentreWrite<T>(
+function withCentreWrite<T>(
   db: PrismaClient, owner: CentreOwner, write: (tx: Prisma.TransactionClient) => Promise<T>,
 ) {
-  return db.$transaction(async (tx) => {
-    // The centre lock also serializes claims for the same completion across different batches.
-    const [centre] = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM "TrainingCentre" WHERE id = ${owner.centreId}::uuid FOR NO KEY UPDATE
-    `;
-    const [author] = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM "User"
-      WHERE id = ${owner.id}::uuid AND "centreId" = ${owner.centreId}::uuid
-        AND active AND role = 'TRAINING_CENTRE'
-      FOR SHARE
-    `;
-    if (!centre || !author) throw new HttpError(403, 'FORBIDDEN', 'This centre is unavailable to your account.');
+  return withWorkflowWrite(db, owner.id, owner.centreId, (tx, actor) => {
+    if (actor.role !== 'TRAINING_CENTRE' || actor.centreId !== owner.centreId) {
+      throw new HttpError(403, 'FORBIDDEN', 'This centre is unavailable to your account.');
+    }
     return write(tx);
-  }, { isolationLevel: 'ReadCommitted', timeout: 10_000 });
+  });
 }
 
 export async function listBatches(db: PrismaClient, owner: CentreOwner) {
@@ -246,61 +240,111 @@ export function importCandidates(db: PrismaClient, owner: CentreOwner, id: strin
 }
 
 export function submitBatch(db: PrismaClient, owner: CentreOwner, id: string, version: string) {
+  return withCentreWrite(db, owner, (tx) => submitDraft(tx, owner, id, version));
+}
+
+// Call inside a transaction that holds the centre lock.
+export async function submitDraft(tx: Prisma.TransactionClient, owner: CentreOwner, id: string, version: string) {
+  const batch = await ownedBatch(tx, owner, id);
+  const revision = currentRevision(batch, version);
+  if (revision.status === 'DISTRICT_REVIEW') return readBatch(tx, owner, id);
+  requireDraft(revision);
+
+  const rows = await tx.revisionCandidate.findMany({
+    where: { revisionId: revision.id },
+    select: {
+      fullName: true,
+      phoneE164: true,
+      candidate: { select: { reference: true, trainingCompletion: { select: completionFields } } },
+    },
+  });
+  if (!rows.length) throw new HttpError(422, 'EMPTY_BATCH', 'Import at least one candidate before submitting.');
+  const now = new Date();
+  const invalid = rows.some(({ fullName, phoneE164, candidate }) =>
+    !isCandidateName(fullName) || !isCandidatePhone(phoneE164)
+    || completionIssue(candidate.trainingCompletion, batch, candidate.reference, now),
+  );
+  if (invalid) {
+    throw new HttpError(422, 'INVALID_ROSTER', 'Some candidates lack a valid completion for this course. Import a corrected CSV before submitting.');
+  }
+
+  const transition = await tx.batchRevision.updateMany({
+    where: { id: revision.id, status: 'DRAFT', editVersion: revision.editVersion },
+    data: { status: 'DISTRICT_REVIEW', submittedAt: now, statusSince: now },
+  });
+  if (transition.count !== 1) throw new HttpError(409, 'STALE_DRAFT', 'This batch changed. Reload it before trying again.');
+
+  const event = {
+    batchId: id,
+    revisionId: revision.id,
+    centreId: owner.centreId,
+    actorId: owner.id,
+    candidateCount: rows.length,
+    submittedAt: now.toISOString(),
+  };
+  await tx.auditEvent.create({
+    data: {
+      resourceType: 'BatchRevision',
+      resourceId: revision.id,
+      action: 'BATCH_SUBMITTED',
+      actorId: owner.id,
+      details: { ...event, previousStatus: 'DRAFT', status: 'DISTRICT_REVIEW' },
+      createdAt: now,
+    },
+  });
+  await tx.outboxEvent.create({
+    data: {
+      type: 'batch.submitted',
+      aggregateId: id,
+      dedupeKey: 'batch.submitted:' + revision.id,
+      payload: event,
+      createdAt: now,
+    },
+  });
+  await notifyWorkflow(tx, batch, 'DISTRICT_REVIEW', 'batch.submitted:' + revision.id, now);
+  return readBatch(tx, owner, id);
+}
+
+export function startCorrection(db: PrismaClient, owner: CentreOwner, id: string, returnedRevisionId: string) {
   return withCentreWrite(db, owner, async (tx) => {
     const batch = await ownedBatch(tx, owner, id);
-    const revision = currentRevision(batch, version);
-    if (revision.status === 'DISTRICT_REVIEW') return readBatch(tx, owner, id);
-    requireDraft(revision);
-
-    const rows = await tx.revisionCandidate.findMany({
-      where: { revisionId: revision.id },
-      select: {
-        fullName: true,
-        phoneE164: true,
-        candidate: { select: { reference: true, trainingCompletion: { select: completionFields } } },
-      },
-    });
-    if (!rows.length) throw new HttpError(422, 'EMPTY_BATCH', 'Import at least one candidate before submitting.');
-    const now = new Date();
-    const invalid = rows.some(({ fullName, phoneE164, candidate }) =>
-      !isCandidateName(fullName) || !isCandidatePhone(phoneE164)
-      || completionIssue(candidate.trainingCompletion, batch, candidate.reference, now),
-    );
-    if (invalid) {
-      throw new HttpError(422, 'INVALID_ROSTER', 'Some candidates lack a valid completion for this course. Import a corrected CSV before submitting.');
+    const previous = batch.revisions[0];
+    if (!previous || previous.id !== returnedRevisionId) {
+      throw new HttpError(409, 'STALE_REVISION', 'This revision has been superseded. Reload the batch.');
+    }
+    if (previous.status !== 'RETURNED') {
+      throw new HttpError(409, 'CORRECTION_UNAVAILABLE', 'Only a returned revision can be corrected.');
     }
 
-    const transition = await tx.batchRevision.updateMany({
-      where: { id: revision.id, status: 'DRAFT', editVersion: revision.editVersion },
-      data: { status: 'DISTRICT_REVIEW', submittedAt: now, statusSince: now },
+    const now = new Date();
+    const revision = await tx.batchRevision.create({
+      data: { batchId: id, revision: previous.revision + 1, createdById: owner.id, createdAt: now, statusSince: now },
     });
-    if (transition.count !== 1) throw new HttpError(409, 'STALE_DRAFT', 'This batch changed. Reload it before trying again.');
+    const snapshots = await tx.revisionCandidate.findMany({
+      where: { revisionId: previous.id },
+      select: { candidateId: true, fullName: true, phoneE164: true },
+    });
+    if (snapshots.length) {
+      await tx.revisionCandidate.createMany({
+        data: snapshots.map((candidate) => ({ ...candidate, batchId: id, revisionId: revision.id })),
+      });
+    }
 
-    const event = {
-      batchId: id,
-      revisionId: revision.id,
-      centreId: owner.centreId,
-      actorId: owner.id,
-      candidateCount: rows.length,
-      submittedAt: now.toISOString(),
+    const payload = {
+      batchId: id, revisionId: revision.id, previousRevisionId: previous.id, revision: revision.revision,
+      centreId: owner.centreId, actorId: owner.id, previousStatus: 'RETURNED', status: 'DRAFT',
+      candidateCount: snapshots.length, occurredAt: now.toISOString(),
     };
     await tx.auditEvent.create({
       data: {
-        resourceType: 'BatchRevision',
-        resourceId: revision.id,
-        action: 'BATCH_SUBMITTED',
-        actorId: owner.id,
-        details: { ...event, previousStatus: 'DRAFT', status: 'DISTRICT_REVIEW' },
-        createdAt: now,
+        resourceType: 'BatchRevision', resourceId: revision.id, action: 'BATCH_CORRECTION_STARTED',
+        actorId: owner.id, details: payload, createdAt: now,
       },
     });
     await tx.outboxEvent.create({
       data: {
-        type: 'batch.submitted',
-        aggregateId: id,
-        dedupeKey: 'batch.submitted:' + revision.id,
-        payload: event,
-        createdAt: now,
+        type: 'batch.correction_started', aggregateId: id, dedupeKey: 'batch.correction_started:' + previous.id,
+        payload, createdAt: now,
       },
     });
     return readBatch(tx, owner, id);

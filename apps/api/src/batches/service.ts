@@ -244,7 +244,7 @@ export function submitBatch(db: PrismaClient, owner: CentreOwner, id: string, ve
 }
 
 // Call inside a transaction that holds the centre lock.
-export async function submitDraft(tx: Prisma.TransactionClient, owner: CentreOwner, id: string, version: string) {
+export async function submitDraft(tx: Prisma.TransactionClient, owner: CentreOwner, id: string, version: string, now = new Date()) {
   const batch = await ownedBatch(tx, owner, id);
   const revision = currentRevision(batch, version);
   if (revision.status === 'DISTRICT_REVIEW') return readBatch(tx, owner, id);
@@ -259,7 +259,6 @@ export async function submitDraft(tx: Prisma.TransactionClient, owner: CentreOwn
     },
   });
   if (!rows.length) throw new HttpError(422, 'EMPTY_BATCH', 'Import at least one candidate before submitting.');
-  const now = new Date();
   const invalid = rows.some(({ fullName, phoneE164, candidate }) =>
     !isCandidateName(fullName) || !isCandidatePhone(phoneE164)
     || completionIssue(candidate.trainingCompletion, batch, candidate.reference, now),

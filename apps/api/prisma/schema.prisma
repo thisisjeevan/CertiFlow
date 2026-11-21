@@ -136,6 +136,7 @@ model BatchRevision {
   statusSince DateTime            @default(now()) @db.Timestamptz(3)
   candidates  RevisionCandidate[]
   decisions   Decision[]
+  escalations ReviewEscalation[]
 
   @@unique([batchId, revision])
   @@unique([id, batchId])
@@ -288,16 +289,37 @@ model OutboxEvent {
   @@index([completedAt, nextAttemptAt])
 }
 
+model ReviewEscalation {
+  id             String         @id @default(uuid()) @db.Uuid
+  revisionId     String         @db.Uuid
+  revision       BatchRevision  @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  stage          ReviewStage
+  stageStartedAt DateTime       @db.Timestamptz(3)
+  thresholdHours Int
+  createdAt      DateTime       @default(now()) @db.Timestamptz(3)
+  notifications  Notification[]
+
+  @@unique([revisionId, stage])
+}
+
+model LiveVersion {
+  scope   String @id
+  version BigInt @default(1)
+}
+
 model Notification {
-  id         BigInt    @id @default(autoincrement())
-  userId     String    @db.Uuid
-  user       User      @relation(fields: [userId], references: [id], onDelete: Restrict)
-  dedupeKey  String
-  type       String
-  resourceId String
-  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
-  readAt     DateTime? @db.Timestamptz(3)
+  id           BigInt            @id @default(autoincrement())
+  userId       String            @db.Uuid
+  user         User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  dedupeKey    String
+  type         String
+  resourceId   String
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+  readAt       DateTime?         @db.Timestamptz(3)
+  escalationId String?           @db.Uuid
+  escalation   ReviewEscalation? @relation(fields: [escalationId], references: [id], onDelete: Restrict)
 
   @@unique([userId, dedupeKey])
+  @@index([escalationId])
   @@index([userId, id])
 }

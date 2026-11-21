@@ -4,7 +4,7 @@
 
 CertiFlow is the Pragati Skills Mission’s staff workspace for deciding who gets certified, issuing certificates, and letting the public check whether a certificate is valid. The programme processes about 8,000 candidates a month through more than 300 training centres. The [hackathon brief](problem-statement.pdf) is the source of the product and submission requirements.
 
-Training centres create batches, import passed candidates from a spreadsheet, submit them, track progress, and correct returned submissions. District officers review batches in their jurisdiction. A quality team reviews large batches, and state officers make the final decision, monitor stuck work, and can revoke a certificate. Candidates receive a private download through simulated WhatsApp. Employers can verify a certificate anonymously. In-app updates should arrive without refreshing, and decisions and escalations must be traceable.
+Training centres create batches, import passed candidates from a spreadsheet, submit them, track progress, and correct returned submissions. District officers review batches in their jurisdiction. A quality team reviews large batches, and state officers make the final decision, monitor stuck work, and can revoke a certificate. Candidates receive a private download through simulated WhatsApp. Employers can verify a certificate anonymously. Staff see changes without refreshing, and decisions and escalations are traceable.
 
 The brief calls for district agreement, extra scrutiny for large batches, and escalation of slow reviews. CertiFlow’s chosen policies set the specifics.
 
@@ -15,7 +15,7 @@ The brief calls for district agreement, extra scrutiny for large batches, and es
 | State review | Every batch requires final state approval. |
 | Return and correction | Officers give a reason. Correction creates a new revision, preserves historical decisions, and requires fresh approvals. |
 | Rejection | Officers give a reason. A rejection closes the current submission. |
-| Escalation | Escalate a pending review stage after 24 hours. Record the notification and deduplicate by revision, stage, and recipient. |
+| Escalation | A district, quality, or state review pending for more than 24 hours alerts active state officers in-app. Record one escalation per revision and stage and one notification per recipient. |
 | Revocation | Only an authorized state officer may revoke, with a reason. Public verification reads current status from PostgreSQL. |
 | Candidate identity | A centre’s candidate reference identifies one participant in a batch. Retain that identity through corrections. A separate completed course can earn a separate certificate. |
 
@@ -35,8 +35,8 @@ The final workflow must demonstrate all six scenarios.
 - **Web** uses React, Vite, and TypeScript. nginx serves the built frontend and proxies the API on the same origin.
 - **API** is an Express TypeScript modular monolith. Auth stores a SHA-256 digest of a random session token in PostgreSQL and sends the original in an HttpOnly, SameSite cookie. Production configuration requires HTTPS. Passwords use salted scrypt. The centre directory filters access in database queries using the current account’s role and scope. A liveness probe tests HTTP and a readiness probe tests the migrated database.
 - **Database** uses PostgreSQL and Prisma Migrate. The checked-in migrations create ownership and revision foreign keys, uniqueness across decisions and certificates, and SQL checks for role assignment and state-dependent metadata. Approval, PDF generation, and delivery have separate statuses. A centre-scoped completion register validates imported candidates. A unique claim prevents two batches from reusing the same training completion.
-- **Worker** is a separate process from the backend package. BullMQ uses Redis for certificate processing and the session-expiry sweep. PostgreSQL tracks unfinished certificate work, so the API can approve batches and verify certificates while Redis is unavailable.
-- **Batch workflow** uses the same PostgreSQL centre row lock for imports, submissions, reviewer decisions, and opening corrections. Each draft write checks its version. A reviewer decision targets the current revision and stage. Transactions commit decisions, status transitions, audit records, outbox records, and relevant notifications together. The [deployment plan](DEPLOYMENT.md) describes how future workers will consume committed events and reconcile unfinished work.
+- **Worker** is a separate process from the backend package. BullMQ uses Redis for certificate processing and the session-expiry sweep. The worker scans review age directly in PostgreSQL. PostgreSQL tracks unfinished certificate work, so the API can approve batches and verify certificates while Redis is unavailable.
+- **Batch workflow** uses the same PostgreSQL centre row lock for imports, submissions, reviewer decisions, and opening corrections. Each draft write checks its version. A reviewer decision targets the current revision and stage. Transactions commit decisions, status transitions, audit records, outbox records, and relevant notifications together. The [deployment plan](DEPLOYMENT.md) describes how the workers consume committed events and reconcile unfinished work.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -58,7 +58,8 @@ The final workflow must demonstrate all six scenarios.
 | GET `/api/reviews/:batchId` | View the latest submitted revision visible to the reviewer, its roster, and decision eligibility. |
 | POST `/api/reviews/:batchId/revisions/:revisionId/decisions` | Record a review decision with JSON `stage`, `outcome`, and `reason` where required. |
 | GET `/api/reviews/:batchId/timeline` | Retrieve scoped revision history, decisions, and attributed audit records. |
-| GET `/api/notifications` | List the signed-in account’s latest 50 notifications. |
+| GET `/api/events` | Private SSE stream. Its `sync` events tell the dashboard which views to refetch. |
+| GET `/api/notifications` | List the signed-in account’s latest 50 notifications. State-office escalation alerts include the stage, revision, threshold, and stage start timestamp. |
 | PATCH `/api/notifications/:id/read` | Mark an owned notification read. Send an empty JSON object. |
 | GET `/api/certificates/batches` | Read issuance and delivery counts for approved batches. State officers see all batches. Training centres see their own. |
 | GET `/api/certificates/batches/:revisionId` | Read certificate and delivery status for a scoped approved revision. |
@@ -77,7 +78,7 @@ docker compose up --build --wait
 
 Open [http://localhost:8080](http://localhost:8080). If port 8080 is busy, set `$env:CERTIFLOW_PORT = '8081'` before the Compose command and use localhost on that port. Use `localhost` as the hostname so the application origin matches the browser.
 
-Startup creates local credentials in Docker volumes, applies the migrations, and seeds the demo accounts, completion register, and two submitted review batches. Use the following command to retrieve the shared, randomly generated demo password from your local Docker project.
+Startup creates local credentials in Docker volumes, applies the migrations, and seeds the demo accounts, completion register, and three submitted review batches. Use the following command to retrieve the shared, randomly generated demo password from your local Docker project.
 
 ```powershell
 docker compose run --rm --no-deps --entrypoint cat seed /run/demo-secrets/password
@@ -92,7 +93,7 @@ docker compose run --rm --no-deps --entrypoint cat seed /run/demo-secrets/passwo
 | Neha | neha@demo.certiflow.test | Quality reviewer |
 | Farah | farah@demo.certiflow.test | State officer |
 
-Anika sees her centre. District officers see the two centres in their district. Quality and state accounts see all three centres. Sign out to switch accounts. The demo credential stays in the same Docker volume across ordinary stops and starts. Only the web service is published, on the loopback interface.
+Anika sees her centre. District officers see the two centres in their district. Quality and state accounts see all three centres. Sign out to switch accounts, or use separate browser profiles for a live demo. The demo credential stays in the same Docker volume across ordinary stops and starts. Only the web service is published, on the loopback interface.
 
 ```powershell
 docker compose ps -a
@@ -162,7 +163,7 @@ The demo completion references remain assigned after submission. Use a separate 
 
 Decision bodies use stage `DISTRICT`, `QUALITY`, or `STATE` and outcome `APPROVE`, `RETURN`, or `REJECT`. Return and rejection reasons must contain 1–500 characters after trimming. The session supplies the actor. A reviewer can record one decision per stage and revision. District officers see submitted history in their district. Quality and state reviewers see revisions that reached their stage. The originating centre sees its complete history, including correction drafts and return reasons. Reviewer roster responses include participant references and names. Candidate phone numbers stay in the centre workspace.
 
-The first eligible transaction to acquire the centre lock decides the outcome of a conflicting action. The next request checks the latest revision and stage under that lock. A valid concurrent second district approval is preserved and advances the state once. Duplicate votes, stale revisions, and closed or incompatible stages return HTTP 409. One new revision can be opened from a return. Its copied roster can be replaced using the CSV import endpoint, and PostgreSQL preserves the original roster. Prior decisions remain visible in history. Pending reviews stay actionable until they move, close, or are superseded. The 24-hour escalation policy will be handled by a later milestone.
+The first eligible transaction to acquire the centre lock decides the outcome of a conflicting action. The next request checks the latest revision and stage under that lock. A valid concurrent second district approval is preserved and advances the state once. Duplicate votes, stale revisions, and closed or incompatible stages return HTTP 409. One new revision can be opened from a return. Its copied roster can be replaced using the CSV import endpoint, and PostgreSQL preserves the original roster. Prior decisions remain visible in history. Pending reviews stay actionable until they move, close, or are superseded.
 
 Each decision writes `BATCH_REVIEW_DECISION` and `batch.review_decision_recorded`. Stage transitions also write `BATCH_REVIEW_TRANSITION` and a unique `batch.transition:<revisionId>:<previousStatus>` outbox key. Final state approval uses event type `batch.approved`, with batch ID, revision ID, centre ID, deciding actor, timestamp, and candidate count for the certificate worker. Submission notifies the district. Each subsequent transition notifies the originating centre and any next-stage reviewers. In-app notifications persist with per-account deduplication and support marking read.
 
@@ -172,11 +173,24 @@ Each decision writes `BATCH_REVIEW_DECISION` and `batch.review_decision_recorded
 - **Digital Skills** starts in district review with 60 candidates. Approve as Dev and Meera, approve quality review as Neha, then give final approval as Farah.
 - To demonstrate corrections, return a revision with a reason. Sign in as Anika, open the correction, adjust the roster if needed, and resubmit. The original decision history stays visible.
 
-Seed runs preserve existing review progress. The review workspace shows the oldest 100 decisions waiting for the signed-in reviewer. Refresh the queue or notifications to see changes from other accounts.
+Seed runs preserve existing review progress. The review workspace shows the oldest 100 decisions waiting for the signed-in reviewer.
+
+## Live updates and escalation
+
+The staff app opens a same-origin authenticated SSE connection. PostgreSQL versions advance within the same transaction as workflow, certificate, delivery, or notification changes. Each API instance checks the versions once per second while it has connected clients. In every check it revalidates the session and derives its scope from the current account. Event payloads contain only view names. The browser fetches the actual data from the existing authorized endpoints. Centre, district, role, and individual notification scopes are resolved server-side.
+
+On every connection or reconnect the browser refetches its current views, including persisted notifications. Intermediate invalidations can be coalesced. A heartbeat keeps the stream open during inactivity. Both updates and reconnect recovery use PostgreSQL and continue while Redis is unavailable.
+
+The worker scans immediately on startup and once a minute after each scan. It checks `statusSince` on pending district, quality, and state revisions. Entering a new stage or submitting a correction starts a fresh clock. Each scan locks up to 100 overdue rows using `FOR UPDATE SKIP LOCKED`. A unique revision and stage key protects the escalation record. The worker persists that record, a system audit event, and one notification per active state officer in the same transaction. The scan can restart and recover missed reviews from the database.
+
+### Try the live demo
+
+1. Open separate browser profiles and sign in as Anika and Dev. Follow the CSV import demo for **Solar Installation Basics**, then submit as Anika. Dev’s queue and unread notification count update automatically. Open the batch as Dev. If Meera approves first, Dev’s open detail shows one vote. Dev’s second approval moves Anika’s screen to state review.
+2. Open **Notifications** as Farah. A fresh seed creates **Overdue Review Demo** with an initial district review timestamp 25 hours in the past. The worker escalates it on startup and the alert identifies the stage, revision, and threshold. Restarting the worker preserves the single alert. The seeded batch remains eligible for ordinary review.
 
 ## Certificate issuance and mock delivery
 
-1. Approve **Digital Skills** through district, quality, and state review. In Farah’s **Approved batches and certificates** workspace, refresh until the batch shows 60 issued and 60 delivered.
+1. Approve **Digital Skills** through district, quality, and state review. Farah’s **Approved batches and certificates** workspace updates to show 60 issued and 60 delivered.
 2. Open the batch and select **View simulated WhatsApp messages**. Each receipt shows the attempt history and an expiring candidate link. The link opens a private PDF download page.
 3. Verify the certificate using its number or the QR code. Revoke it with a reason in the state workspace, then repeat verification. New requests see the committed revocation.
 
@@ -188,9 +202,9 @@ The mock provider commits one durable acceptance per idempotency key. The worker
 
 Candidate grants expire after 24 hours. The mock ledger stores a digest, and the state-only inbox derives the link with the secret from the `certificate-secrets` volume. The URL puts the bearer token in its fragment. The download page submits it in the Authorization header. Public verification exposes the number, course, centre, issue date, and current validity for a valid certificate. Every download checks the grant and current revocation state. Revocation keeps completed mock receipts for audit and cancels pending delivery.
 
-## Milestone 4 scope
+## Operational limits
 
-CertiFlow covers scenarios A, B, C, D, and F. Scheduled review escalation and SSE remain pending. Certificate progress uses manual refresh. The local PDF volume is shared by processes on the same Docker host. Multi-host deployments need shared private object storage. Terminal generation and delivery failures are visible to staff. Manual resends and grant renewal are pending. Verification and download rate limiting applies per API process.
+The local PDF volume is shared by processes on the same Docker host. Multi-host deployments need shared private object storage. Terminal generation and delivery failures are visible to staff. Manual resends and grant renewal are pending. Verification and download rate limiting applies per API process. Live invalidations are coalesced between one-second polls, and PostgreSQL write contention on shared state-office scopes should be measured before a large rollout.
 
 The lockfile pins Prisma’s transitive Effect dependency to a patched 3.x release.
 

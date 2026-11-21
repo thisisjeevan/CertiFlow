@@ -1,17 +1,25 @@
 import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
+import type { Server } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import request, { type Test } from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { hashPassword } from '../../src/auth/password.js';
 import { readApiConfig } from '../../src/config.js';
 import type { DecisionOutcome, ReviewStage, Role } from '../../src/generated/prisma/client.js';
+import { createLiveUpdates } from '../../src/live.js';
+import { escalateOverdueReviews } from '../../src/workflow/escalation.js';
 import { testDatabase } from './database.js';
 
 const db = testDatabase();
-const app = createApp(readApiConfig({
+const config = readApiConfig({
   NODE_ENV: 'test', APP_ORIGIN: 'http://localhost:8080', DATABASE_URL: process.env.TEST_DATABASE_URL,
-}), db);
+});
+const app = createApp(config, db);
+const live = createLiveUpdates(db);
+let liveServer: Server;
+let liveUrl: string;
 const key = randomBytes(6).toString('hex');
 const password = randomBytes(24).toString('base64url');
 const accounts = ['owner', 'otherOwner', 'dev', 'meera', 'kabir', 'outsider', 'quality', 'state'] as const;
@@ -56,9 +64,19 @@ beforeAll(async () => {
     if (!Array.isArray(values) || !values[0]) throw new Error('Missing session cookie.');
     cookies.set(account, values[0].split(';', 1)[0]!);
   }));
+
+  liveServer = createApp(config, db, live).listen(0, '127.0.0.1');
+  await once(liveServer, 'listening');
+  const address = liveServer.address();
+  if (!address || typeof address === 'string') throw new Error('Missing test server address.');
+  liveUrl = 'http://127.0.0.1:' + address.port;
 }, 20_000);
 
 afterAll(async () => {
+  live.close();
+  const closed = liveServer ? new Promise<void>((resolve) => liveServer.close(() => resolve())) : undefined;
+  liveServer?.closeAllConnections();
+  await closed;
   try {
     await db.$transaction(async (tx) => {
       const batches = await tx.batch.findMany({ where: { centreId: { in: centreIds } }, select: { id: true } });
@@ -66,6 +84,7 @@ afterAll(async () => {
       const revisions = await tx.batchRevision.findMany({ where: { batchId: { in: batchIds } }, select: { id: true } });
       const revisionIds = revisions.map(({ id }) => id);
       await tx.notification.deleteMany({ where: { resourceId: { in: batchIds } } });
+      await tx.reviewEscalation.deleteMany({ where: { revisionId: { in: revisionIds } } });
       await tx.outboxEvent.deleteMany({ where: { aggregateId: { in: batchIds } } });
       await tx.auditEvent.deleteMany({ where: { resourceType: 'BatchRevision', resourceId: { in: revisionIds } } });
       await tx.decision.deleteMany({ where: { revisionId: { in: revisionIds } } });
@@ -125,6 +144,222 @@ async function submittedBatch(count = 3, account: 'owner' | 'otherOwner' = 'owne
   const submitted = (await submit(imported, account).expect(200)).body.batch as Batch;
   return { ...submitted, csv };
 }
+
+function openEvents(account: Account) {
+  const controller = new AbortController();
+  const frames: string[] = [];
+  const received = fetch(liveUrl + '/api/events', {
+    headers: { cookie: cookies.get(account)! }, signal: controller.signal,
+  }).then(async (response) => {
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
+    let buffered = '';
+    try {
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        buffered += next.value;
+        const complete = buffered.split('\n\n');
+        buffered = complete.pop()!;
+        frames.push(...complete.filter((frame) => frame.startsWith('event:')));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }).catch((error: unknown) => {
+    if (!controller.signal.aborted) throw error;
+  });
+
+  const sync = (scope: string) => vi.waitFor(() => {
+    expect(frames.some((frame) => frame.startsWith('event: sync\n') && frame.includes('"' + scope + '"'))).toBe(true);
+  }, { timeout: 4_000 });
+  return { frames, sync, close: async () => { controller.abort(); await received; } };
+}
+
+describe('scoped SSE using the shared PostgreSQL state', () => {
+  it('requires a valid session and rejects cross-origin stream requests', async () => {
+    await request(app).get('/api/events').expect(401);
+    await request(app).get('/api/events').set('Cookie', 'certiflow_session=' + 'A'.repeat(43)).expect(401);
+    await as(request(app).get('/api/events'), 'owner').set('Origin', 'https://other.example.test').expect(403);
+    const stream = openEvents('outsider');
+    try {
+      await stream.sync('workflow');
+      expect(stream.frames).toEqual(['event: sync\ndata: ["workflow","notifications"]']);
+      await db.user.update({ where: { id: actorIds.get('outsider')! }, data: { districtId: districtIds[0] } });
+      await vi.waitFor(() => expect(stream.frames).toContain('event: session-ended\ndata: {}'), { timeout: 4_000 });
+    } finally {
+      await db.user.update({ where: { id: actorIds.get('outsider')! }, data: { districtId: districtIds[1] } });
+      await stream.close();
+    }
+  });
+
+  it('updates the reviewer queue and owner across API instances while isolating other centres and districts', async () => {
+    const owner = openEvents('owner');
+    const dev = openEvents('dev');
+    const otherOwner = openEvents('otherOwner');
+    const outsider = openEvents('outsider');
+    const state = openEvents('state');
+    const observers = [owner, dev, otherOwner, outsider, state];
+    try {
+      await Promise.all(observers.map((observer) => observer.sync('workflow')));
+      for (const { frames } of observers) frames.length = 0;
+
+      const batch = await submittedBatch();
+      await dev.sync('workflow');
+      await dev.sync('notifications');
+      expect((await as(request(app).get('/api/reviews'), 'dev').expect(200)).body.queue)
+        .toContainEqual(expect.objectContaining({ id: batch.id, districtApprovals: 0 }));
+      expect(state.frames).toEqual([]);
+
+      dev.frames.length = 0;
+      await decide('meera', batch).expect(201);
+      await dev.sync('workflow');
+      expect((await as(request(app).get('/api/reviews'), 'dev').expect(200)).body.queue)
+        .toContainEqual(expect.objectContaining({ id: batch.id, districtApprovals: 1 }));
+
+      owner.frames.length = 0;
+      await decide('dev', batch).expect(201);
+      await owner.sync('workflow');
+      await state.sync('workflow');
+      expect((await as(request(app).get('/api/batches/' + batch.id), 'owner').expect(200)).body.batch.revision.status).toBe('STATE_REVIEW');
+      expect(otherOwner.frames).toEqual([]);
+      expect(outsider.frames).toEqual([]);
+      expect(JSON.stringify([...owner.frames, ...dev.frames, ...state.frames])).not.toContain(batch.id);
+    } finally {
+      await Promise.all(observers.map((observer) => observer.close()));
+    }
+  });
+
+  it('resynchronizes committed changes and persisted notifications when a client reconnects', async () => {
+    const original = openEvents('dev');
+    try { await original.sync('workflow'); } finally { await original.close(); }
+    const batch = await submittedBatch();
+    const resumed = openEvents('dev');
+    try {
+      await resumed.sync('workflow');
+      await resumed.sync('notifications');
+      expect((await as(request(app).get('/api/reviews'), 'dev').expect(200)).body.queue)
+        .toContainEqual(expect.objectContaining({ id: batch.id }));
+      expect((await as(request(app).get('/api/notifications'), 'dev').expect(200)).body.notifications)
+        .toContainEqual(expect.objectContaining({ resourceId: batch.id, type: 'BATCH_DISTRICT_REVIEW' }));
+    } finally {
+      await resumed.close();
+    }
+  });
+});
+
+const hours = (value: number) => value * 60 * 60 * 1_000;
+const alertType = 'REVIEW_ESCALATED';
+const alertRows = (revisionId: string) => db.reviewEscalation.findMany({ where: { revisionId }, orderBy: { createdAt: 'asc' } });
+const changeStageAge = (revisionId: string, start: Date) =>
+  db.batchRevision.update({ where: { id: revisionId }, data: { statusSince: start } });
+
+describe('automatic escalation in PostgreSQL', () => {
+  it('waits until a review exceeds 24 hours, records the evidence, and alerts state officers only', async () => {
+    const batch = await submittedBatch();
+    const now = new Date();
+    const start = new Date(now.getTime() - hours(24));
+    await changeStageAge(batch.revision.id, start);
+    await escalateOverdueReviews(db, now);
+    expect(await alertRows(batch.revision.id)).toEqual([]);
+
+    const state = openEvents('state');
+    try {
+      await state.sync('notifications');
+      state.frames.length = 0;
+      const escalatedAt = new Date(now.getTime() + 1);
+      await escalateOverdueReviews(db, escalatedAt);
+      await state.sync('notifications');
+      expect(await alertRows(batch.revision.id)).toMatchObject([
+        { stage: 'DISTRICT', stageStartedAt: start, thresholdHours: 24, createdAt: escalatedAt },
+      ]);
+      expect(await db.auditEvent.findMany({ where: { resourceId: batch.revision.id, action: alertType } })).toMatchObject([
+        { actorId: null, createdAt: escalatedAt, details: { stage: 'DISTRICT', batchId: batch.id,
+          revisionId: batch.revision.id, thresholdHours: 24, escalatedAt: escalatedAt.toISOString() } },
+      ]);
+      expect(await db.notification.findMany({ where: { resourceId: batch.id, type: alertType } }))
+        .toMatchObject([{ userId: actorIds.get('state') }]);
+      const inbox = (await as(request(app).get('/api/notifications'), 'state').expect(200)).body.notifications;
+      expect(inbox).toContainEqual(expect.objectContaining({
+        type: alertType, resourceId: batch.id,
+        escalation: { stage: 'DISTRICT', thresholdHours: 24, stageStartedAt: start.toISOString(),
+          revision: { revision: 1, batch: { courseName: expect.any(String) } } },
+      }));
+    } finally {
+      await state.close();
+    }
+  });
+
+  it('uses row locks and deduplicates concurrent scans and restarts', async () => {
+    const batch = await submittedBatch();
+    const now = new Date();
+    await changeStageAge(batch.revision.id, new Date(now.getTime() - hours(25)));
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "BatchRevision" WHERE id = ${batch.revision.id}::uuid FOR UPDATE`;
+      await escalateOverdueReviews(db, now);
+      expect(await alertRows(batch.revision.id)).toHaveLength(0);
+    });
+    await Promise.all([escalateOverdueReviews(db, now), escalateOverdueReviews(db, now), escalateOverdueReviews(db, now)]);
+    await escalateOverdueReviews(db, new Date(now.getTime() + hours(1)));
+    expect(await alertRows(batch.revision.id)).toHaveLength(1);
+    expect(await db.notification.count({ where: { resourceId: batch.id, type: alertType } })).toBe(1);
+    expect(await db.auditEvent.count({ where: { resourceId: batch.revision.id, action: alertType } })).toBe(1);
+  });
+
+  it('resets review age through district, quality and state and preserves earlier escalations', async () => {
+    const batch = await submittedBatch(50);
+    const now = new Date();
+    const old = new Date(now.getTime() - hours(25));
+    await changeStageAge(batch.revision.id, old);
+    await escalateOverdueReviews(db, now);
+
+    await decide('dev', batch).expect(201);
+    await decide('meera', batch).expect(201);
+    await escalateOverdueReviews(db, new Date());
+    expect(await alertRows(batch.revision.id)).toMatchObject([{ stage: 'DISTRICT' }]);
+    await changeStageAge(batch.revision.id, old);
+    await escalateOverdueReviews(db, new Date());
+
+    await decide('quality', batch, 'QUALITY').expect(201);
+    await escalateOverdueReviews(db, new Date());
+    expect(await alertRows(batch.revision.id)).toHaveLength(2);
+    await changeStageAge(batch.revision.id, old);
+    await escalateOverdueReviews(db, new Date());
+    expect((await alertRows(batch.revision.id)).map(({ stage }) => stage).sort()).toEqual(['DISTRICT', 'QUALITY', 'STATE']);
+    const quality = openEvents('quality');
+    try {
+      await quality.sync('workflow');
+      quality.frames.length = 0;
+      await decide('state', batch, 'STATE').expect(201);
+      await quality.sync('workflow');
+      expect((await as(request(app).get('/api/reviews/' + batch.id), 'quality').expect(200)).body.batch.revision.status).toBe('APPROVED');
+    } finally {
+      await quality.close();
+    }
+    await escalateOverdueReviews(db, new Date(Date.now() + hours(25)));
+    expect(await alertRows(batch.revision.id)).toHaveLength(3);
+  });
+
+  it('gives a corrected resubmission its own clock and its own deduplication key', async () => {
+    const batch = await submittedBatch();
+    const old = new Date(Date.now() - hours(25));
+    await changeStageAge(batch.revision.id, old);
+    await escalateOverdueReviews(db);
+    await decide('dev', batch, 'DISTRICT', 'RETURN', 'Correct the evidence.').expect(201);
+    const correction = (await as(request(app).post('/api/batches/' + batch.id + '/correction'), 'owner')
+      .send({ revisionId: batch.revision.id }).expect(201)).body.batch as Batch;
+    await submit(correction).expect(200);
+    await escalateOverdueReviews(db);
+    expect(await alertRows(correction.revision.id)).toHaveLength(0);
+    await changeStageAge(correction.revision.id, old);
+    await escalateOverdueReviews(db);
+    expect(await alertRows(correction.revision.id)).toMatchObject([{ stage: 'DISTRICT' }]);
+    expect(await alertRows(batch.revision.id)).toMatchObject([{ stage: 'DISTRICT' }]);
+    expect(await db.notification.count({ where: { resourceId: batch.id, type: alertType } })).toBe(2);
+  });
+});
 
 function transitions(batch: Batch) {
   return db.outboxEvent.findMany({

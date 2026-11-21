@@ -17,7 +17,9 @@ export async function notifyWorkflow(
     REJECTED: owners,
     APPROVED: owners,
   };
-  const recipients = await tx.user.findMany({ where: { AND: [{ active: true }, scopes[status]] }, select: { id: true } });
+  const recipients = await tx.user.findMany({
+    where: { AND: [{ active: true }, scopes[status]] }, select: { id: true }, orderBy: { id: 'asc' },
+  });
   if (!recipients.length) return;
 
   await tx.notification.createMany({

@@ -4,16 +4,20 @@ import type { Prisma } from '../generated/prisma/client.js';
 const examples = [
   { id: '0f000000-0000-4000-8000-000000000201', prefix: 'ELECTRICAL', courseName: 'Electrical Safety', count: 3 },
   { id: '0f000000-0000-4000-8000-000000000202', prefix: 'DIGITAL', courseName: 'Digital Skills', count: 60 },
+  { id: '0f000000-0000-4000-8000-000000000203', prefix: 'OVERDUE', courseName: 'Overdue Review Demo', count: 1, ageHours: 25 },
 ];
 
 export async function seedReviewBatches(tx: Prisma.TransactionClient, owner: CentreOwner) {
   for (const example of examples) {
     if (await tx.batch.findUnique({ where: { id: example.id }, select: { id: true } })) continue;
 
+    const submittedAt = new Date(Date.now() - (example.ageHours ?? 0) * 60 * 60 * 1_000);
     const revision = await tx.batchRevision.create({
       data: {
-        batch: { create: { id: example.id, centreId: owner.centreId, courseName: example.courseName } },
+        batch: { create: { id: example.id, centreId: owner.centreId, courseName: example.courseName, createdAt: submittedAt } },
         revision: 1,
+        createdAt: submittedAt,
+        statusSince: submittedAt,
         createdBy: { connect: { id: owner.id } },
       },
     });
@@ -42,6 +46,6 @@ export async function seedReviewBatches(tx: Prisma.TransactionClient, owner: Cen
         };
       }),
     });
-    await submitDraft(tx, owner, example.id, revision.id + ':' + revision.editVersion);
+    await submitDraft(tx, owner, example.id, revision.id + ':' + revision.editVersion, submittedAt);
   }
 }

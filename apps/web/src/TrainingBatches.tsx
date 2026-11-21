@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { ApiError, apiRequest, errorMessage, postJson, type FieldIssue } from './api';
 
 import { WorkflowHistory, statusLabels, type RevisionStatus } from './WorkflowHistory';
+import { useLiveVersion } from './LiveUpdates';
 
 interface BatchSummary {
   id: string;
@@ -80,11 +81,13 @@ export function TrainingBatches({ centreId, onSessionExpired }: {
   const [notice, setNotice] = useState('');
   const [success, setSuccess] = useState('');
   const [issues, setIssues] = useState<FieldIssue[]>([]);
+  const liveVersion = useLiveVersion('workflow');
+  const selectedId = selected?.id;
 
   useEffect(() => {
     const controller = new AbortController();
     void apiRequest<{ batches: BatchSummary[] }>('/api/batches', { signal: controller.signal })
-      .then(({ batches }) => setBatches(batches))
+      .then(({ batches }) => { if (!controller.signal.aborted) setBatches(batches); })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         if (error instanceof ApiError && error.status === 401) onSessionExpired();
@@ -94,7 +97,22 @@ export function TrainingBatches({ centreId, onSessionExpired }: {
         }
       });
     return () => controller.abort();
-  }, [onSessionExpired]);
+  }, [onSessionExpired, liveVersion]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const controller = new AbortController();
+    void apiRequest<BatchResponse>('/api/batches/' + selectedId, { signal: controller.signal })
+      .then(({ batch }) => {
+        if (!controller.signal.aborted) setSelected((current) => current?.id === selectedId ? batch : current);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (error instanceof ApiError && error.status === 401) onSessionExpired();
+        else setNotice(errorMessage(error));
+      });
+    return () => controller.abort();
+  }, [onSessionExpired, selectedId, liveVersion]);
 
   async function perform(action: () => Promise<void>) {
     setBusy(true);

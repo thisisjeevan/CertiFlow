@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ApiError, apiRequest, errorMessage, postJson } from './api';
+import { useLiveVersion } from './LiveUpdates';
 
 interface BatchProgress {
   batch: { courseName: string; centre: { name: string } };
@@ -53,6 +54,8 @@ export function CertificateWorkspace({ stateOfficer, onSessionExpired }: {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [success, setSuccess] = useState('');
+  const liveVersion = useLiveVersion('certificates');
+  const inboxOpen = messages !== null;
 
   const handleError = useCallback((error: unknown) => {
     if (error instanceof ApiError && error.status === 401) onSessionExpired();
@@ -65,7 +68,23 @@ export function CertificateWorkspace({ stateOfficer, onSessionExpired }: {
       .then(({ batches }) => { if (!controller.signal.aborted) setBatches(batches); })
       .catch((error: unknown) => { if (!controller.signal.aborted) handleError(error); });
     return () => controller.abort();
-  }, [handleError]);
+  }, [handleError, liveVersion]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    const path = '/api/certificates/batches/' + selectedId;
+    void Promise.all([
+      apiRequest<Details>(path, options),
+      inboxOpen ? apiRequest<{ messages: MockMessage[] }>(path + '/mock-messages', options) : undefined,
+    ]).then(([detail, inbox]) => {
+      if (controller.signal.aborted) return;
+      setDetails(detail);
+      if (inbox) setMessages(inbox.messages);
+    }).catch((error: unknown) => { if (!controller.signal.aborted) handleError(error); });
+    return () => controller.abort();
+  }, [handleError, inboxOpen, liveVersion, selectedId]);
 
   async function perform(action: () => Promise<void>) {
     setBusy(true);

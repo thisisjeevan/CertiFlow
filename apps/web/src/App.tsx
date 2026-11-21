@@ -3,6 +3,7 @@ import { ApiError, apiRequest, errorMessage, postJson, type Centre, type Role, t
 import { TrainingBatches } from './TrainingBatches';
 import { ReviewWorkspace } from './ReviewWorkspace';
 import { Notifications } from './Notifications';
+import { LiveUpdates } from './LiveUpdates';
 import { CertificateWorkspace } from './CertificateWorkspace';
 import { CandidateDownload, PublicVerification } from './PublicCertificate';
 
@@ -149,7 +150,7 @@ function StaffApp() {
       <main>
         {notice && <p className="notice" role="alert">{notice}</p>}
         {loading ? <p role="status">Loading your session…</p> : user ? (
-          <div key={user.id}>
+          <LiveUpdates key={user.id} onSessionExpired={endSession}>
             <CentreDirectory user={user} onSessionExpired={endSession} />
             <Notifications onSessionExpired={endSession} />
             {user.role === 'TRAINING_CENTRE' ? (
@@ -158,7 +159,7 @@ function StaffApp() {
             {(user.role === 'STATE_OFFICER' || user.role === 'TRAINING_CENTRE') && (
               <CertificateWorkspace stateOfficer={user.role === 'STATE_OFFICER'} onSessionExpired={endSession} />
             )}
-          </div>
+          </LiveUpdates>
         ) : <SignIn onSignIn={(signedInUser) => { setNotice(''); setUser(signedInUser); }} />}
       </main>
     </>

@@ -3,10 +3,12 @@ import { Redis } from 'ioredis';
 import { readWorkerConfig } from './config.js';
 import { startCertification } from './certificates/dispatcher.js';
 import { connectDatabase } from './db.js';
+import { startEscalationScanner } from './workflow/escalation.js';
 
 const config = readWorkerConfig();
 if (!config.CERTIFICATE_LINK_SECRET) throw new Error('CERTIFICATE_LINK_SECRET is required for the worker');
 const db = connectDatabase(config.DATABASE_URL);
+const stopEscalation = startEscalationScanner(db, report);
 const certification = startCertification(db, {
   redisUrl: config.REDIS_URL, prefix: config.CERTIFICATION_QUEUE_PREFIX,
   directory: config.CERTIFICATE_STORAGE, origin: config.APP_ORIGIN,
@@ -49,7 +51,7 @@ async function shutdown() {
   const timeout = setTimeout(() => process.exit(1), 10_000);
   timeout.unref();
   try {
-    await certification.stop();
+    await Promise.all([certification.stop(), stopEscalation()]);
     await worker.close();
     await queue.close();
     connection.disconnect();

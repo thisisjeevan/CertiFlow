@@ -1,6 +1,6 @@
 # CertiFlow production deployment plan
 
-This plan describes the production target. The local Compose workflow now runs approval, PostgreSQL outbox dispatch, private PDF issuance, mock delivery, verification, and revocation. Local certificates use a single-host Docker volume and the mock provider uses PostgreSQL for its receipt ledger. The sizing figures are starting assumptions to verify with load and failure tests.
+This plan describes the production target. The local Compose workflow runs approval, automatic review escalation, scoped staff SSE, PostgreSQL outbox dispatch, private PDF issuance, mock delivery, public verification, and revocation. Local certificates use a single-host Docker volume and the mock provider uses PostgreSQL for its receipt ledger. The sizing figures are starting assumptions to verify with load and failure tests.
 
 ## Design load
 
@@ -20,7 +20,8 @@ flowchart LR
     DB --> Relay[Outbox relay and reconciliation on ECS]
     Relay --> Redis[(ElastiCache for Redis and BullMQ)]
     Redis --> PDF[PDF workers on ECS]
-    Redis --> Notify[Delivery and escalation workers on ECS]
+    Redis --> Notify[Delivery workers on ECS]
+    Scanner[Periodic review scanner in worker process] --> DB
     PDF --> Files[(Private S3 certificate bucket)]
     PDF --> DB
     Notify --> DB
@@ -38,7 +39,7 @@ Use RDS PostgreSQL Multi-AZ for managed failover and point-in-time recovery. Rea
 - Target 15 PDFs per second for headroom. If a measured render consumes 250 ms of CPU, eight effective vCPUs at 50% utilization give about 16 PDFs per second. Budget for render memory and consume the CPU-heavy work in processes that can use the available cores. Verify with actual templates and files.
 - Target 15 accepted provider requests per second where the configured quota permits. Constrain concurrency, apply a shared queue rate limit, and pace retries using provider feedback. At 15 per second a 30,000-message backlog takes about 33 minutes to drain after arrivals stop. With 8.3 arrivals per second during the peak, the same backlog takes about 75 minutes to drain.
 - Cap connections per API and worker task. Scale down if the database pool or lock wait becomes the bottleneck and consider a managed connection proxy as concurrency grows. Keep transactions short and external calls out of them.
-- SSE uses scoped, persisted notifications and a reconnect cursor. A per-recipient notification sequence must be assigned under a transaction lock so later cursor positions cannot commit ahead of earlier ones for that user. Reconnects also read current workflow state. Use a heartbeat to keep the ALB connection open and a Redis signal to wake connections if needed. Store every notification in PostgreSQL first.
+- Each Express instance reads transactional PostgreSQL versions once per second while streams are open. One query rechecks the active sessions and their current centre, district, role and user scopes. SSE carries view names only, and every reconnect refetches authorized persisted state. Keep proxy buffering and caching disabled and the idle timeout longer than the 15-second heartbeat. At the target load, measure hot-counter lock waits and dashboard refetch traffic. If bounded polling becomes a bottleneck, add a best-effort wake-up channel and keep the database snapshot for reconciliation.
 
 ## Failure handling
 
@@ -48,7 +49,7 @@ Use RDS PostgreSQL Multi-AZ for managed failover and point-in-time recovery. Rea
 | Redis restart or data loss | Scan PostgreSQL for unfinished events and re-enqueue them with stable keys. Recover failed or missing jobs explicitly. Redis durability reduces recovery lag. The API commits approvals while the queue is unavailable. |
 | WhatsApp errors, timeouts, or outage | Persist attempts and receipts. Back off with jitter, honoring quota responses. After an ambiguous timeout retry with the same provider key or query the provider’s receipt. Exactly-once acceptance depends on provider deduplication or receipt lookup. The mock should persist deduplication across restarts and simulate a timeout after acceptance. |
 | Slow database or failover | Bound connection and statement timeouts, pause worker pulls as saturation increases, and propagate readiness failures. Retry only safe operations based on idempotency keys. Keep verification unavailable during loss of the authoritative read path. |
-| Delayed review | Scan indexed stage timestamps periodically in PostgreSQL. Persist uniquely keyed escalation notifications and audit activity in a transaction so repeated scans are safe. |
+| Delayed review | The worker scans indexed review timestamps on startup and once per minute. It uses PostgreSQL row locks and a unique revision and stage key to persist one escalation, audit event and per-state-officer notification. Redis is outside the scan path. |
 
 ## Certificate storage and access
 

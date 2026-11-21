@@ -8,8 +8,9 @@ import { certificateRoutes, verificationRoutes } from './certificates/routes.js'
 import type { ApiConfig } from './config.js';
 import { handleError, notFound, requestId } from './http.js';
 import { notificationRoutes, reviewRoutes } from './workflow/routes.js';
+import { createLiveUpdates } from './live.js';
 
-export function createApp(config: ApiConfig, db: PrismaClient) {
+export function createApp(config: ApiConfig, db: PrismaClient, live = createLiveUpdates(db)) {
   const app = express();
 
   app.disable('x-powered-by');
@@ -38,6 +39,7 @@ export function createApp(config: ApiConfig, db: PrismaClient) {
   app.use('/api/batches', batchRoutes(db, config));
   app.use('/api/reviews', reviewRoutes(db, config));
   app.use('/api/notifications', notificationRoutes(db, config));
+  app.use('/api/events', live.routes(config.APP_ORIGIN));
   app.use('/api/verify', verificationRoutes(db));
   app.use('/api/certificates', certificateRoutes(db, config));
   app.use(notFound);

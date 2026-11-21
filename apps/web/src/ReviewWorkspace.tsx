@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ApiError, apiRequest, errorMessage, postJson, type Role } from './api';
 import { WorkflowHistory, statusLabels, type Outcome, type RevisionStatus, type Stage } from './WorkflowHistory';
+import { useLiveVersion } from './LiveUpdates';
 
 interface QueueItem {
   id: string;
@@ -31,6 +32,8 @@ export function ReviewWorkspace({ role, onSessionExpired }: { role: Role; onSess
   const [notice, setNotice] = useState('');
   const [success, setSuccess] = useState('');
   const [reason, setReason] = useState('');
+  const liveVersion = useLiveVersion('workflow');
+  const selectedId = selected?.id;
 
   const handleError = useCallback((error: unknown) => {
     if (error instanceof ApiError && error.status === 401) onSessionExpired();
@@ -39,7 +42,7 @@ export function ReviewWorkspace({ role, onSessionExpired }: { role: Role; onSess
 
   const loadQueue = useCallback(async (signal?: AbortSignal) => {
     const result = await apiRequest<{ queue: QueueItem[] }>('/api/reviews', { signal });
-    setQueue(result.queue);
+    if (!signal?.aborted) setQueue(result.queue);
   }, []);
 
   useEffect(() => {
@@ -48,7 +51,18 @@ export function ReviewWorkspace({ role, onSessionExpired }: { role: Role; onSess
       if (!controller.signal.aborted) handleError(error);
     });
     return () => controller.abort();
-  }, [handleError, loadQueue]);
+  }, [handleError, loadQueue, liveVersion]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const controller = new AbortController();
+    void apiRequest<{ batch: ReviewDetail }>('/api/reviews/' + selectedId, { signal: controller.signal })
+      .then(({ batch }) => {
+        if (!controller.signal.aborted) setSelected((current) => current?.id === selectedId ? batch : current);
+      })
+      .catch((error: unknown) => { if (!controller.signal.aborted) handleError(error); });
+    return () => controller.abort();
+  }, [handleError, selectedId, liveVersion]);
 
   async function selectBatch(id: string) {
     setBusy(true);

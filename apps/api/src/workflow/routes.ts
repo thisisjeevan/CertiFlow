@@ -56,11 +56,18 @@ export function notificationRoutes(db: PrismaClient, config: ApiConfig) {
   }, authenticate(db));
 
   router.get('/', async (req, res) => {
+    const viewer = getPrincipal(req);
     const entries = await db.notification.findMany({
-      where: { userId: getPrincipal(req).id },
+      where: { userId: viewer.id, escalationId: viewer.role === 'STATE_OFFICER' ? undefined : null },
       orderBy: { id: 'desc' },
       take: 50,
-      select: { id: true, type: true, resourceId: true, createdAt: true, readAt: true },
+      select: {
+        id: true, type: true, resourceId: true, createdAt: true, readAt: true,
+        escalation: { select: {
+          stage: true, stageStartedAt: true, thresholdHours: true,
+          revision: { select: { revision: true, batch: { select: { courseName: true } } } },
+        } },
+      },
     });
     res.json({ notifications: entries.map(({ id, ...entry }) => ({ ...entry, id: id.toString() })) });
   });
@@ -70,7 +77,8 @@ export function notificationRoutes(db: PrismaClient, config: ApiConfig) {
     if (typeof id !== 'string' || !/^[1-9]\d{0,18}$/.test(id) || BigInt(id) > 9_223_372_036_854_775_807n) {
       throw new HttpError(404, 'NOTIFICATION_NOT_FOUND', 'This notification is unavailable.');
     }
-    const where = { id: BigInt(id), userId: getPrincipal(req).id };
+    const viewer = getPrincipal(req);
+    const where = { id: BigInt(id), userId: viewer.id, escalationId: viewer.role === 'STATE_OFFICER' ? undefined : null };
     const updated = await db.notification.updateMany({ where: { ...where, readAt: null }, data: { readAt: new Date() } });
     if (!updated.count && !await db.notification.findFirst({ where, select: { id: true } })) {
       throw new HttpError(404, 'NOTIFICATION_NOT_FOUND', 'This notification is unavailable.');

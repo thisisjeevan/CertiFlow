@@ -1,14 +1,34 @@
 import { randomUUID } from 'node:crypto';
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 
+export interface FieldIssue {
+  row: number;
+  field: string;
+  message: string;
+}
+
 export class HttpError extends Error {
   constructor(
     public readonly status: number,
     public readonly code: string,
     message: string,
+    public readonly issues?: readonly FieldIssue[],
   ) {
     super(message);
   }
+}
+
+export function requireSameOriginType(origin: string, contentType: string): RequestHandler {
+  return (req, _res, next) => {
+    const requestOrigin = req.get('Origin');
+    if (requestOrigin && requestOrigin !== origin) {
+      throw new HttpError(403, 'FORBIDDEN_ORIGIN', 'The request origin is not allowed.');
+    }
+    if (!req.is(contentType)) {
+      throw new HttpError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Use ' + contentType + '.');
+    }
+    next();
+  };
 }
 
 export const requestId: RequestHandler = (_req, res, next) => {
@@ -27,7 +47,7 @@ export const handleError: ErrorRequestHandler = (error: unknown, _req, res, next
   }
 
   if (error instanceof HttpError) {
-    res.status(error.status).json({ error: { code: error.code, message: error.message } });
+    res.status(error.status).json({ error: { code: error.code, message: error.message, issues: error.issues } });
     return;
   }
 

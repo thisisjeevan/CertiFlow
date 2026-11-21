@@ -48,6 +48,19 @@ async function seed() {
       if (code === 'N-01') anikaCentreId = centre.id;
     }
 
+    const courseName = 'Solar Installation Basics';
+    await tx.trainingCompletion.createMany({
+      data: [101, 102, 103, 105].map((number) => ({
+        centreId: anikaCentreId,
+        reference: 'N01-SOLAR-' + number,
+        candidateReference: 'TRAINEE-' + number,
+        courseName,
+        completedOn: new Date('2025-04-01T00:00:00Z'),
+        passed: number !== 105,
+      })),
+      skipDuplicates: true,
+    });
+
     for (const account of credentials) {
       const profile = {
         displayName: account.name,

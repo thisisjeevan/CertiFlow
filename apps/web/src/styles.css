@@ -51,3 +51,34 @@ button.secondary:hover { background: #235246; }
 .centres li + li { border-top: 1px solid #e0e8e4; }
 .centres small { display: block; color: #405751; }
 .code { color: #315f50; font-size: .8rem; white-space: nowrap; }
+
+.batch-workspace { margin-top: 2rem; }
+.batch-layout { display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(0, 2fr); align-items: start; gap: 1rem; }
+.batch-layout h3 { margin: 0 0 .8rem; font-size: 1.05rem; }
+.batch-layout .batch-list-title { margin-top: 1.5rem; }
+.batch-list { display: grid; gap: .5rem; list-style: none; padding: 0; margin: 0; }
+.batch-list button { width: 100%; text-align: left; background: #fff; color: #20493c; border-color: #a7bcb3; }
+.batch-list button:hover, .batch-list button[aria-current] { background: #e6f1eb; border-color: #568575; }
+.batch-list small { display: block; color: #405751; }
+.batch-detail-heading { display: flex; align-items: start; justify-content: space-between; flex-wrap: wrap; gap: .8rem; }
+.batch-detail-heading h3 { margin: 0 0 .25rem; }
+.draft-forms { display: grid; gap: 1.15rem; padding: 1rem 0; margin-bottom: .5rem; border-bottom: 1px solid #e0e8e4; }
+.draft-forms p { margin: 0; font-size: .9rem; }
+.draft-forms input { margin: 0; }
+button.outline { color: #20493c; border-color: #879f96; background: white; }
+button.outline:hover { background: #e6f1eb; }
+.sample-links { display: flex; flex-wrap: wrap; gap: .3rem .9rem; font-size: .85rem; }
+.sample-links a { color: #12543e; text-underline-offset: 2px; }
+.table-scroll { overflow-x: auto; margin: .8rem 0; }
+.table-scroll table { width: 100%; border-collapse: collapse; text-align: left; font-size: .9rem; }
+.table-scroll caption { text-align: left; font-weight: 700; margin-bottom: .5rem; }
+.table-scroll th, .table-scroll td { padding: .55rem .45rem; vertical-align: top; border-bottom: 1px solid #e0e8e4; }
+.table-scroll th { color: #315f50; }
+.phone { white-space: nowrap; }
+.success { color: #18533e; background: #e6f1eb; border-radius: .4rem; padding: .6rem .8rem; }
+.submit-batch { display: grid; gap: .5rem; margin-top: 1rem; }
+.submit-batch small { color: #405751; }
+
+@media (max-width: 700px) {
+  .batch-layout { grid-template-columns: minmax(0, 1fr); }
+}

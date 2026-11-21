@@ -59,13 +59,14 @@ model District {
 }
 
 model TrainingCentre {
-  id         String   @id @default(uuid()) @db.Uuid
-  code       String   @unique
-  name       String
-  districtId String   @db.Uuid
-  district   District @relation(fields: [districtId], references: [id], onDelete: Restrict)
-  users      User[]
-  batches    Batch[]
+  id                  String               @id @default(uuid()) @db.Uuid
+  code                String               @unique
+  name                String
+  districtId          String               @db.Uuid
+  district            District             @relation(fields: [districtId], references: [id], onDelete: Restrict)
+  users               User[]
+  batches             Batch[]
+  trainingCompletions TrainingCompletion[]
 
   @@index([districtId])
 }
@@ -119,6 +120,7 @@ model BatchRevision {
   batch       Batch               @relation(fields: [batchId], references: [id], onDelete: Restrict)
   revision    Int
   status      RevisionStatus      @default(DRAFT)
+  editVersion Int                 @default(0)
   createdById String              @db.Uuid
   createdBy   User                @relation(fields: [createdById], references: [id], onDelete: Restrict)
   createdAt   DateTime            @default(now()) @db.Timestamptz(3)
@@ -132,12 +134,28 @@ model BatchRevision {
   @@index([status, statusSince])
 }
 
+model TrainingCompletion {
+  id                 String         @id @default(uuid()) @db.Uuid
+  centreId           String         @db.Uuid
+  centre             TrainingCentre @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  reference          String
+  candidateReference String
+  courseName         String
+  completedOn        DateTime       @db.Date
+  passed             Boolean
+  candidate          Candidate?
+
+  @@unique([centreId, reference])
+}
+
 model Candidate {
-  id        String              @id @default(uuid()) @db.Uuid
-  batchId   String              @db.Uuid
-  batch     Batch               @relation(fields: [batchId], references: [id], onDelete: Restrict)
-  reference String
-  revisions RevisionCandidate[]
+  id                   String              @id @default(uuid()) @db.Uuid
+  batchId              String              @db.Uuid
+  batch                Batch               @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  reference            String
+  trainingCompletionId String?             @unique @db.Uuid
+  trainingCompletion   TrainingCompletion? @relation(fields: [trainingCompletionId], references: [id], onDelete: Restrict)
+  revisions            RevisionCandidate[]
 
   @@unique([batchId, reference])
   @@unique([id, batchId])
